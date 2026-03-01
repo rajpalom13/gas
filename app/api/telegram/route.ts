@@ -15,6 +15,7 @@ import {
   formatINR,
   formatDateShort,
 } from "@/lib/telegram";
+import { parseUPIScreenshot } from "@/lib/ocr";
 
 export async function POST(request: Request) {
   try {
@@ -38,9 +39,16 @@ export async function POST(request: Request) {
 async function handleMessage(message: {
   chat: { id: number };
   text?: string;
+  photo?: { file_id: string; file_size?: number }[];
 }) {
   const chatId = message.chat.id;
   const text = message.text?.trim() || "";
+
+  // Handle photo messages (UPI screenshot OCR)
+  if (message.photo && message.photo.length > 0) {
+    await handlePhotoMessage(chatId, message.photo);
+    return;
+  }
 
   // Check if user is in a conversation flow
   const session = getSession(chatId);
@@ -178,8 +186,9 @@ async function handleCallback(query: {
     const size = data.replace("settle_cyl_", "");
     const session = getSession(chatId);
     if (!session) return;
+    const isOCR = session.step === "ocr_settle_cylinder";
     session.data.currentCylinder = size;
-    session.step = "settle_qty";
+    session.step = isOCR ? "ocr_settle_qty" : "settle_qty";
     setSession(chatId, session);
     await sendMessage(
       chatId,
@@ -194,7 +203,8 @@ async function handleCallback(query: {
       await sendMessage(chatId, "⚠️ Add at least one cylinder first.");
       return;
     }
-    session.step = "settle_expenses";
+    const isOCR = session.step === "ocr_settle_cylinder";
+    session.step = isOCR ? "ocr_settle_expenses" : "settle_expenses";
     setSession(chatId, session);
     await sendMessage(chatId, "💰 Enter <b>expenses</b> amount (or 0):");
     return;
@@ -208,6 +218,21 @@ async function handleCallback(query: {
   if (data === "settle_cancel") {
     clearSession(chatId);
     await sendMessage(chatId, "❌ Settlement cancelled.", mainMenuKeyboard());
+    return;
+  }
+
+  // OCR payment flow
+  if (data.startsWith("apply_payment_")) {
+    const amount = parseFloat(data.replace("apply_payment_", ""));
+    await handleOCRApplyPayment(chatId, messageId, amount);
+    return;
+  }
+
+  if (data.startsWith("ocr_staff_")) {
+    const parts = data.replace("ocr_staff_", "").split("_");
+    const amount = parseFloat(parts.pop()!);
+    const staffId = parts.join("_");
+    await handleOCRStaffSelected(chatId, staffId, amount);
     return;
   }
 
@@ -341,6 +366,85 @@ async function handleSessionInput(
     session.step = "settle_actual_cash";
     setSession(chatId, session);
     await sendMessage(chatId, "💵 Enter <b>actual cash received</b>:");
+    return;
+  }
+
+  // ── OCR Settlement flow (actual cash pre-filled) ──
+  if (session.step === "ocr_settle_qty") {
+    const qty = parseInt(text);
+    if (isNaN(qty) || qty <= 0) {
+      await sendMessage(chatId, "⚠️ Enter a valid quantity (> 0):");
+      return;
+    }
+    const items = (session.data.items as { cylinderSize: string; quantity: number }[]) || [];
+    items.push({
+      cylinderSize: session.data.currentCylinder as string,
+      quantity: qty,
+    });
+    session.data.items = items;
+    session.step = "ocr_settle_cylinder";
+    setSession(chatId, session);
+    await handleOCRCylinderSelect(chatId);
+    return;
+  }
+
+  if (session.step === "ocr_settle_expenses") {
+    const val = parseFloat(text) || 0;
+    session.data.expenses = val;
+
+    // Skip actual cash input — use OCR amount
+    const actualCash = session.data.actualCash as number;
+    const items = session.data.items as { cylinderSize: string; quantity: number }[];
+    let grossRevenue = 0;
+    const itemLines: string[] = [];
+
+    for (const item of items) {
+      const inv = await Inventory.findOne({ cylinderSize: item.cylinderSize }).lean();
+      const price = inv?.pricePerUnit || 0;
+      const total = item.quantity * price;
+      grossRevenue += total;
+      itemLines.push(
+        `  ${item.cylinderSize}: ${item.quantity} × ${formatINR(price)} = ${formatINR(total)}`
+      );
+    }
+
+    const expectedCash = grossRevenue - val;
+    const shortage = Math.max(0, expectedCash - actualCash);
+
+    session.data.grossRevenue = grossRevenue;
+    session.data.expectedCash = expectedCash;
+    session.data.shortage = shortage;
+    session.step = "settle_confirm";
+    setSession(chatId, session);
+
+    const summary = [
+      `📝 <b>Settlement Summary</b>`,
+      ``,
+      `👤 Staff: <b>${session.data.staffName}</b>`,
+      `📅 Date: ${formatDateShort(new Date())}`,
+      ``,
+      `📦 <b>Cylinders:</b>`,
+      ...itemLines,
+      ``,
+      `💰 Gross Revenue: <b>${formatINR(grossRevenue)}</b>`,
+      `📉 Expenses: ${formatINR(val)}`,
+      `📊 Expected Cash: ${formatINR(expectedCash)}`,
+      `💵 Actual Cash (from UPI): ${formatINR(actualCash)}`,
+      shortage > 0
+        ? `⚠️ Shortage: <b>${formatINR(shortage)}</b>`
+        : `✅ No shortage`,
+    ].join("\n");
+
+    await sendMessage(
+      chatId,
+      summary,
+      inlineKeyboard([
+        [
+          { text: "✅ Confirm", callback_data: "settle_confirm" },
+          { text: "❌ Cancel", callback_data: "settle_cancel" },
+        ],
+      ])
+    );
     return;
   }
 
@@ -837,6 +941,158 @@ async function handleSettleConfirm(chatId: number) {
       [{ text: "📝 New Settlement", callback_data: "new_settlement" }],
       [{ text: "📊 Dashboard", callback_data: "dashboard" }],
       [{ text: "🏠 Main Menu", callback_data: "main_menu" }],
+    ])
+  );
+}
+
+// ─── OCR / PHOTO HANDLERS ───────────────────────────────────
+
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
+
+async function handlePhotoMessage(
+  chatId: number,
+  photo: { file_id: string; file_size?: number }[]
+) {
+  // Use the largest resolution (last element)
+  const fileId = photo[photo.length - 1].file_id;
+
+  await sendMessage(chatId, "🔍 Reading payment screenshot...");
+
+  try {
+    // Get file path from Telegram
+    const fileRes = await fetch(
+      `https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${fileId}`
+    );
+    const fileData = await fileRes.json();
+    const filePath = fileData.result?.file_path;
+
+    if (!filePath) {
+      await sendMessage(chatId, "⚠️ Could not download the image. Please try again.");
+      return;
+    }
+
+    // Download the image
+    const imageRes = await fetch(
+      `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`
+    );
+    const imageBuffer = Buffer.from(await imageRes.arrayBuffer());
+
+    // Run OCR
+    const result = await parseUPIScreenshot(imageBuffer);
+
+    if (!result) {
+      await sendMessage(
+        chatId,
+        "❌ Could not read the payment screenshot. Please try a clearer image.",
+        mainMenuKeyboard()
+      );
+      return;
+    }
+
+    const statusIcon = result.status === "success" ? "✅" : "❌";
+    const msg = [
+      `📸 <b>Payment Detected:</b>`,
+      ``,
+      `💰 Amount: <b>${formatINR(result.amount)}</b>`,
+      `${statusIcon} Status: ${result.status}`,
+      `🔢 TxnID: <code>${result.transaction_id}</code>`,
+      `📅 Date: ${result.date}`,
+      `👤 From: ${result.sender_name}`,
+      `👤 To: ${result.receiver_name}`,
+    ].join("\n");
+
+    await sendMessage(
+      chatId,
+      msg,
+      inlineKeyboard([
+        [
+          { text: "✅ Apply to Settlement", callback_data: `apply_payment_${result.amount}` },
+          { text: "❌ Cancel", callback_data: "main_menu" },
+        ],
+      ])
+    );
+  } catch (error) {
+    console.error("Photo message handling error:", error);
+    await sendMessage(
+      chatId,
+      "❌ Could not read the payment screenshot. Please try a clearer image.",
+      mainMenuKeyboard()
+    );
+  }
+}
+
+async function handleOCRApplyPayment(
+  chatId: number,
+  messageId: number,
+  amount: number
+) {
+  const staff = await Staff.find({ isActive: true }).sort({ name: 1 }).lean();
+
+  if (staff.length === 0) {
+    await editMessage(
+      chatId,
+      messageId,
+      "⚠️ No staff members found. Add staff first.",
+      inlineKeyboard([
+        [{ text: "➕ Add Staff", callback_data: "add_staff" }],
+        [{ text: "🏠 Main Menu", callback_data: "main_menu" }],
+      ])
+    );
+    return;
+  }
+
+  await editMessage(
+    chatId,
+    messageId,
+    `📝 <b>Apply Payment: ${formatINR(amount)}</b>\n\nSelect staff member:`,
+    inlineKeyboard([
+      ...staff.map((s) => [
+        { text: `👤 ${s.name}`, callback_data: `ocr_staff_${s._id}_${amount}` },
+      ]),
+      [{ text: "❌ Cancel", callback_data: "main_menu" }],
+    ])
+  );
+}
+
+async function handleOCRStaffSelected(
+  chatId: number,
+  staffId: string,
+  amount: number
+) {
+  const staff = await Staff.findById(staffId).lean();
+  if (!staff) return;
+
+  setSession(chatId, {
+    step: "ocr_settle_cylinder",
+    data: { staffId, staffName: staff.name, items: [], actualCash: amount },
+  });
+
+  await handleOCRCylinderSelect(chatId);
+}
+
+async function handleOCRCylinderSelect(chatId: number) {
+  const session = getSession(chatId);
+  if (!session) return;
+
+  const items = session.data.items as { cylinderSize: string; quantity: number }[];
+  const inventory = await Inventory.find({}).sort({ cylinderSize: 1 }).lean();
+
+  const currentItems = items.length
+    ? `\n\n📦 Added so far:\n${items.map((i) => `  ${i.quantity}× ${i.cylinderSize}`).join("\n")}`
+    : "";
+
+  await sendMessage(
+    chatId,
+    `📝 Settlement for <b>${session.data.staffName}</b>\n💵 UPI Amount: <b>${formatINR(session.data.actualCash as number)}</b>\n\nSelect cylinder to add:${currentItems}`,
+    inlineKeyboard([
+      ...inventory.map((i) => [
+        {
+          text: `${i.cylinderSize} — ${formatINR(i.pricePerUnit)} (${i.fullStock} avail)`,
+          callback_data: `settle_cyl_${i.cylinderSize}`,
+        },
+      ]),
+      [{ text: "✅ Done Adding", callback_data: "settle_done_cylinders" }],
+      [{ text: "❌ Cancel", callback_data: "settle_cancel" }],
     ])
   );
 }
