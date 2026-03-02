@@ -2,13 +2,18 @@
 
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { Package, TrendingUp, TrendingDown, AlertTriangle, Users, IndianRupee, ChevronLeft, ChevronRight, Calendar, PackagePlus } from "lucide-react";
+import Link from "next/link";
+import { Package, TrendingUp, TrendingDown, AlertTriangle, Users, IndianRupee, ChevronLeft, ChevronRight, Calendar, PackagePlus, LayoutDashboard } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/utils";
 import { Skeleton } from "@/components/ui/skeleton";
+import { staggerContainer, fadeUpItem } from "@/lib/animations";
+import { PageHeader } from "@/components/ui/page-header";
+import { StatCard } from "@/components/ui/stat-card";
+import { sectionThemes, buildCylinderColorMap } from "@/lib/theme";
 
 interface DashboardData {
   stats: {
@@ -55,19 +60,6 @@ interface DashboardData {
   date: string;
 }
 
-const containerVariants = {
-  hidden: { opacity: 0 },
-  show: {
-    opacity: 1,
-    transition: { staggerChildren: 0.06 },
-  },
-};
-
-const itemVariants = {
-  hidden: { opacity: 0, y: 12 },
-  show: { opacity: 1, y: 0, transition: { duration: 0.3 } },
-};
-
 function getTodayIST(): string {
   const now = new Date();
   const istOffset = 5.5 * 60 * 60 * 1000;
@@ -108,10 +100,12 @@ export default function DashboardPage() {
   if (loading && !data) {
     return (
       <div className="space-y-6">
-        <div>
-          <h1 className="text-2xl font-bold">Dashboard</h1>
-          <p className="text-zinc-500 text-sm mt-1">Daily overview and statistics</p>
-        </div>
+        <PageHeader
+          icon={<LayoutDashboard className="h-5 w-5" />}
+          title="Dashboard"
+          subtitle="Daily overview and statistics"
+          gradient={sectionThemes.dashboard.gradient}
+        />
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
           {[...Array(5)].map((_, i) => (
             <Skeleton key={i} className="h-32 rounded-xl" />
@@ -165,36 +159,36 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-start justify-between flex-wrap gap-4">
-        <div>
-          <h1 className="text-2xl font-bold">Dashboard</h1>
-          <p className="text-zinc-500 text-sm mt-1">
-            {isToday ? "Today's" : ""} overview &mdash; {formatDisplayDate(selectedDate)}
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button variant="outline" size="icon" onClick={() => changeDate(-1)}>
-            <ChevronLeft className="h-4 w-4" />
-          </Button>
-          <div className="relative">
-            <Calendar className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-400 pointer-events-none" />
-            <Input
-              type="date"
-              value={selectedDate}
-              onChange={(e) => setSelectedDate(e.target.value)}
-              className="pl-9 w-[170px]"
-            />
-          </div>
-          <Button variant="outline" size="icon" onClick={() => changeDate(1)}>
-            <ChevronRight className="h-4 w-4" />
-          </Button>
-          {!isToday && (
-            <Button variant="outline" size="sm" onClick={() => setSelectedDate(getTodayIST())}>
-              Today
+      <PageHeader
+        icon={<LayoutDashboard className="h-5 w-5" />}
+        title="Dashboard"
+        subtitle={`${isToday ? "Today's" : ""} overview \u2014 ${formatDisplayDate(selectedDate)}`}
+        gradient={sectionThemes.dashboard.gradient}
+        actions={
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="icon" onClick={() => changeDate(-1)}>
+              <ChevronLeft className="h-4 w-4" />
             </Button>
-          )}
-        </div>
-      </div>
+            <div className="relative">
+              <Calendar className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-400 pointer-events-none" />
+              <Input
+                type="date"
+                value={selectedDate}
+                onChange={(e) => setSelectedDate(e.target.value)}
+                className="pl-9 w-[170px]"
+              />
+            </div>
+            <Button variant="outline" size="icon" onClick={() => changeDate(1)}>
+              <ChevronRight className="h-4 w-4" />
+            </Button>
+            {!isToday && (
+              <Button variant="outline" size="sm" onClick={() => setSelectedDate(getTodayIST())}>
+                Today
+              </Button>
+            )}
+          </div>
+        }
+      />
 
       {/* Low Stock Alerts */}
       {data?.lowStockAlerts && data.lowStockAlerts.length > 0 && (
@@ -220,105 +214,82 @@ export default function DashboardPage() {
       )}
 
       <motion.div
-        variants={containerVariants}
+        variants={staggerContainer}
         initial="hidden"
         animate="show"
         className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5"
       >
         {statCards.map((card) => (
-          <motion.div key={card.title} variants={itemVariants}>
-            <Card className="hover:shadow-md transition-shadow">
-              <CardContent className="p-5">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-sm text-zinc-500">{card.title}</p>
-                    <p className="text-2xl font-bold mt-1">{card.value}</p>
-                    {card.suffix && (
-                      <p className="text-xs text-zinc-400 mt-0.5">{card.suffix}</p>
-                    )}
-                  </div>
-                  <div className={`${card.bg} p-3 rounded-xl`}>
-                    <card.icon className={`h-5 w-5 ${card.color}`} />
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
+          <motion.div key={card.title} variants={fadeUpItem}>
+            <StatCard
+              icon={<card.icon className="h-5 w-5" />}
+              label={card.title}
+              value={card.suffix ? `${card.value} ${card.suffix}` : card.value}
+              iconBg={card.bg}
+              iconColor={card.color}
+            />
           </motion.div>
         ))}
       </motion.div>
 
       <motion.div
-        variants={containerVariants}
+        variants={staggerContainer}
         initial="hidden"
         animate="show"
         className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3"
       >
-        <motion.div variants={itemVariants}>
-          <Card>
-            <CardContent className="p-5">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm text-zinc-500">Active Staff</p>
-                  <p className="text-2xl font-bold mt-1">{stats?.staffCount || 0}</p>
-                </div>
-                <div className="bg-violet-50 dark:bg-violet-900/20 p-3 rounded-xl">
-                  <Users className="h-5 w-5 text-violet-600" />
-                </div>
-              </div>
-            </CardContent>
-          </Card>
+        <motion.div variants={fadeUpItem}>
+          <StatCard
+            icon={<Users className="h-5 w-5" />}
+            label="Active Staff"
+            value={stats?.staffCount || 0}
+            iconBg="bg-violet-50 dark:bg-violet-900/20"
+            iconColor="text-violet-600"
+          />
         </motion.div>
 
-        <motion.div variants={itemVariants}>
-          <Card>
-            <CardContent className="p-5">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm text-zinc-500">Cash Collected</p>
-                  <p className="text-2xl font-bold mt-1">{formatCurrency(stats?.totalActualCash || 0)}</p>
-                </div>
-                <div className="bg-sky-50 dark:bg-sky-900/20 p-3 rounded-xl">
-                  <IndianRupee className="h-5 w-5 text-sky-600" />
-                </div>
-              </div>
-            </CardContent>
-          </Card>
+        <motion.div variants={fadeUpItem}>
+          <StatCard
+            icon={<IndianRupee className="h-5 w-5" />}
+            label="Cash Collected"
+            value={formatCurrency(stats?.totalActualCash || 0)}
+            iconBg="bg-sky-50 dark:bg-sky-900/20"
+            iconColor="text-sky-600"
+          />
         </motion.div>
 
-        <motion.div variants={itemVariants}>
-          <Card>
-            <CardContent className="p-5">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm text-zinc-500">Total Staff Debt</p>
-                  <p className="text-2xl font-bold mt-1">{formatCurrency(stats?.totalDebt || 0)}</p>
-                </div>
-                <div className="bg-rose-50 dark:bg-rose-900/20 p-3 rounded-xl">
-                  <AlertTriangle className="h-5 w-5 text-rose-600" />
-                </div>
-              </div>
-            </CardContent>
-          </Card>
+        <motion.div variants={fadeUpItem}>
+          <StatCard
+            icon={<AlertTriangle className="h-5 w-5" />}
+            label="Total Staff Debt"
+            value={formatCurrency(stats?.totalDebt || 0)}
+            iconBg="bg-rose-50 dark:bg-rose-900/20"
+            iconColor="text-rose-600"
+          />
         </motion.div>
       </motion.div>
 
       {/* Inventory Overview */}
-      <motion.div variants={itemVariants} initial="hidden" animate="show">
+      <motion.div variants={fadeUpItem} initial="hidden" animate="show">
         <Card>
           <CardHeader>
             <CardTitle className="text-base">Inventory Overview</CardTitle>
           </CardHeader>
           <CardContent>
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-              {data?.inventory.map((item) => {
+              {(() => {
+                const sizes = data?.inventory.map((i) => i.cylinderSize) || [];
+                const colorMap = buildCylinderColorMap(sizes);
+                return data?.inventory.map((item) => {
                 const lowAlert = data?.lowStockAlerts?.find((a) => a.cylinderSize === item.cylinderSize);
+                const cylColor = colorMap[item.cylinderSize];
                 return (
                   <div
                     key={item.cylinderSize}
-                    className={`rounded-lg border p-4 ${
+                    className={`rounded-lg border p-4 border-l-4 ${cylColor?.border || ""} ${
                       lowAlert
                         ? "border-amber-300 dark:border-amber-700 bg-amber-50/50 dark:bg-amber-900/10"
-                        : "border-zinc-100 dark:border-zinc-800"
+                        : cylColor?.bg || "border-zinc-100 dark:border-zinc-800"
                     }`}
                   >
                     <p className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">
@@ -341,7 +312,8 @@ export default function DashboardPage() {
                     </div>
                   </div>
                 );
-              })}
+              });
+              })()}
             </div>
           </CardContent>
         </Card>
@@ -349,10 +321,13 @@ export default function DashboardPage() {
 
       {/* Empty Cylinder Reconciliation */}
       {data?.emptyReconciliation && data.emptyReconciliation.length > 0 && (
-        <motion.div variants={itemVariants} initial="hidden" animate="show">
+        <motion.div variants={fadeUpItem} initial="hidden" animate="show">
           <Card>
-            <CardHeader>
+            <CardHeader className="flex flex-row items-center justify-between">
               <CardTitle className="text-base">Empty Cylinder Reconciliation</CardTitle>
+              <Link href="/empty-cylinders" className="text-sm text-zinc-500 hover:text-zinc-900 dark:hover:text-white transition-colors">
+                View Details →
+              </Link>
             </CardHeader>
             <CardContent>
               {/* Mobile card view */}
@@ -390,9 +365,9 @@ export default function DashboardPage() {
                       </div>
                       <div>
                         <p className="text-xs text-zinc-500">Mismatch</p>
-                        <p className={`font-semibold ${item.mismatch !== 0 ? "text-red-600" : "text-emerald-600"}`}>
+                        <Badge variant={item.mismatch !== 0 ? "destructive" : "success"} className="text-sm font-bold mt-0.5">
                           {item.mismatch}
-                        </p>
+                        </Badge>
                       </div>
                     </div>
                   </div>
@@ -426,7 +401,7 @@ export default function DashboardPage() {
                         <td className="text-right py-2 px-3">{item.expected}</td>
                         <td className="text-right py-2 px-3">{item.returned}</td>
                         <td className="text-right py-2 px-3">
-                          <Badge variant={item.mismatch !== 0 ? "destructive" : "success"}>
+                          <Badge variant={item.mismatch !== 0 ? "destructive" : "success"} className="text-sm font-bold">
                             {item.mismatch}
                           </Badge>
                         </td>

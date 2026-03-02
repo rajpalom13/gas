@@ -2,11 +2,13 @@
 
 import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Plus, FileText, Eye, ChevronDown, ChevronRight, List, CalendarDays } from "lucide-react";
+import { Plus, FileText, Eye, ChevronDown, ChevronRight, List, CalendarDays, Receipt } from "lucide-react";
 import Link from "next/link";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { PageHeader } from "@/components/ui/page-header";
+import { sectionThemes } from "@/lib/theme";
 import {
   Table,
   TableHeader,
@@ -31,6 +33,7 @@ interface SettlementRow {
   netRevenue?: number;
   actualCashReceived?: number;
   amountPending?: number;
+  emptyCylindersReturned?: Array<{ cylinderSize: string; quantity: number }>;
   // Legacy fields
   expenses: number;
   expectedCash: number;
@@ -82,6 +85,8 @@ export default function SettlementsPage() {
   const getAmountPending = (s: SettlementRow) => s.amountPending ?? s.shortage ?? 0;
   const getDBCCount = (s: SettlementRow) =>
     s.items.filter((i) => i.isNewConnection).reduce((sum, i) => sum + i.quantity, 0);
+  const getTotalEmpties = (s: SettlementRow) =>
+    (s.emptyCylindersReturned || []).reduce((sum, e) => sum + e.quantity, 0);
 
   // Group settlements by date for day summary view
   const daySummaries: DaySummary[] = (() => {
@@ -120,47 +125,47 @@ export default function SettlementsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between flex-wrap gap-4">
-        <div>
-          <h1 className="text-2xl font-bold">Settlements</h1>
-          <p className="text-zinc-500 text-sm mt-1">
-            {data.total} total settlements
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          {/* View toggle */}
-          <div className="flex rounded-md border border-zinc-200 dark:border-zinc-800 overflow-hidden">
-            <button
-              className={`px-3 py-2 text-xs font-medium flex items-center gap-1 transition-colors ${
-                viewMode === "list"
-                  ? "bg-zinc-900 text-white dark:bg-white dark:text-zinc-900"
-                  : "bg-white dark:bg-zinc-950 text-zinc-500 hover:bg-zinc-50 dark:hover:bg-zinc-900"
-              }`}
-              onClick={() => setViewMode("list")}
-            >
-              <List className="h-3 w-3" />
-              List
-            </button>
-            <button
-              className={`px-3 py-2 text-xs font-medium flex items-center gap-1 transition-colors ${
-                viewMode === "day-summary"
-                  ? "bg-zinc-900 text-white dark:bg-white dark:text-zinc-900"
-                  : "bg-white dark:bg-zinc-950 text-zinc-500 hover:bg-zinc-50 dark:hover:bg-zinc-900"
-              }`}
-              onClick={() => setViewMode("day-summary")}
-            >
-              <CalendarDays className="h-3 w-3" />
-              Day Summary
-            </button>
+      <PageHeader
+        icon={<Receipt className="h-5 w-5" />}
+        title="Settlements"
+        subtitle={`${data.total} total settlements`}
+        gradient={sectionThemes.settlements.gradient}
+        actions={
+          <div className="flex items-center gap-2">
+            {/* View toggle */}
+            <div className="flex rounded-md border border-zinc-200 dark:border-zinc-800 overflow-hidden">
+              <button
+                className={`px-3 py-2 text-xs font-medium flex items-center gap-1 transition-colors ${
+                  viewMode === "list"
+                    ? "bg-zinc-900 text-white dark:bg-white dark:text-zinc-900"
+                    : "bg-white dark:bg-zinc-950 text-zinc-500 hover:bg-zinc-50 dark:hover:bg-zinc-900"
+                }`}
+                onClick={() => setViewMode("list")}
+              >
+                <List className="h-3 w-3" />
+                List
+              </button>
+              <button
+                className={`px-3 py-2 text-xs font-medium flex items-center gap-1 transition-colors ${
+                  viewMode === "day-summary"
+                    ? "bg-zinc-900 text-white dark:bg-white dark:text-zinc-900"
+                    : "bg-white dark:bg-zinc-950 text-zinc-500 hover:bg-zinc-50 dark:hover:bg-zinc-900"
+                }`}
+                onClick={() => setViewMode("day-summary")}
+              >
+                <CalendarDays className="h-3 w-3" />
+                Day Summary
+              </button>
+            </div>
+            <Link href="/settlements/new">
+              <Button>
+                <Plus className="h-4 w-4" />
+                New Settlement
+              </Button>
+            </Link>
           </div>
-          <Link href="/settlements/new">
-            <Button>
-              <Plus className="h-4 w-4" />
-              New Settlement
-            </Button>
-          </Link>
-        </div>
-      </div>
+        }
+      />
 
       {loading ? (
         <div className="space-y-3">
@@ -179,7 +184,11 @@ export default function SettlementsPage() {
                   <motion.div
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
-                    className="rounded-xl border border-zinc-200 dark:border-zinc-800 p-4 space-y-3"
+                    className={`rounded-xl border border-zinc-200 dark:border-zinc-800 p-4 space-y-3 border-l-4 ${
+                      getAmountPending(s) > 0
+                        ? "border-l-amber-500"
+                        : "border-l-emerald-500"
+                    }`}
                   >
                     <div className="flex items-center justify-between">
                       <div>
@@ -221,6 +230,11 @@ export default function SettlementsPage() {
                           {dbcCount} DBC
                         </Badge>
                       )}
+                      {getTotalEmpties(s) > 0 && (
+                        <Badge variant="warning" className="text-[10px]">
+                          {getTotalEmpties(s)} empties
+                        </Badge>
+                      )}
                     </div>
                   </motion.div>
                 </Link>
@@ -248,6 +262,7 @@ export default function SettlementsPage() {
                     <TableHead>Net Revenue</TableHead>
                     <TableHead>Actual Cash</TableHead>
                     <TableHead>Pending</TableHead>
+                    <TableHead>Empties</TableHead>
                     <TableHead className="text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -259,7 +274,11 @@ export default function SettlementsPage() {
                         key={s._id}
                         initial={{ opacity: 0 }}
                         animate={{ opacity: 1 }}
-                        className="border-b border-zinc-100 dark:border-zinc-800"
+                        className={`border-b border-zinc-100 dark:border-zinc-800 ${
+                          getAmountPending(s) > 0
+                            ? "border-l-4 border-l-amber-500"
+                            : "border-l-4 border-l-emerald-500"
+                        }`}
                       >
                         <TableCell className="font-medium">
                           <Link
@@ -323,6 +342,15 @@ export default function SettlementsPage() {
                             {formatCurrency(getAmountPending(s))}
                           </Badge>
                         </TableCell>
+                        <TableCell>
+                          {getTotalEmpties(s) > 0 ? (
+                            <Badge variant="warning" className="text-[10px]">
+                              {getTotalEmpties(s)}
+                            </Badge>
+                          ) : (
+                            <span className="text-zinc-400">0</span>
+                          )}
+                        </TableCell>
                         <TableCell className="text-right">
                           <Link href={`/settlements/${s._id}`}>
                             <Button variant="ghost" size="sm">
@@ -337,7 +365,7 @@ export default function SettlementsPage() {
                   {data.settlements.length === 0 && (
                     <TableRow>
                       <TableCell
-                        colSpan={9}
+                        colSpan={10}
                         className="text-center py-12 text-zinc-500"
                       >
                         <FileText className="h-8 w-8 mx-auto mb-2 opacity-50" />

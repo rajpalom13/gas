@@ -3,9 +3,10 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
-import { ArrowLeft, Plus, Trash2, Loader2, Calculator } from "lucide-react";
+import { ArrowLeft, Plus, Trash2, Loader2, Calculator, Receipt } from "lucide-react";
 import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { sectionThemes } from "@/lib/theme";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -232,7 +233,8 @@ export default function NewSettlementPage() {
           className="space-y-6"
         >
           {/* Staff & Date */}
-          <Card>
+          <Card className="relative overflow-hidden">
+            <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-blue-500 to-blue-400" />
             <CardHeader>
               <CardTitle className="text-base">Basic Information</CardTitle>
             </CardHeader>
@@ -285,7 +287,8 @@ export default function NewSettlementPage() {
           </Card>
 
           {/* Cylinder Items */}
-          <Card>
+          <Card className="relative overflow-hidden">
+            <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-indigo-500 to-indigo-400" />
             <CardHeader>
               <div className="flex items-center justify-between">
                 <CardTitle className="text-base">Cylinders Delivered</CardTitle>
@@ -414,7 +417,8 @@ export default function NewSettlementPage() {
           </Card>
 
           {/* Transactions */}
-          <Card>
+          <Card className="relative overflow-hidden">
+            <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-emerald-500 to-emerald-400" />
             <CardHeader>
               <CardTitle className="text-base">Transactions</CardTitle>
             </CardHeader>
@@ -438,7 +442,8 @@ export default function NewSettlementPage() {
           </Card>
 
           {/* Empty Cylinders Returned */}
-          <Card>
+          <Card className="relative overflow-hidden">
+            <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-amber-500 to-amber-400" />
             <CardHeader>
               <CardTitle className="text-base">Empty Cylinders Returned</CardTitle>
             </CardHeader>
@@ -477,6 +482,7 @@ export default function NewSettlementPage() {
                   debtors={debtors}
                   onChange={setDebtors}
                   customers={customerList}
+                  cylinderSizes={inventoryList.map((i: InventoryOption) => i.cylinderSize)}
                 />
               </CardContent>
             </Card>
@@ -511,7 +517,8 @@ export default function NewSettlementPage() {
           </Card>
 
           {/* Summary */}
-          <Card className="bg-zinc-50 dark:bg-zinc-900 border-2">
+          <Card className="bg-zinc-50 dark:bg-zinc-900 border-2 relative overflow-hidden">
+            <div className={`absolute inset-x-0 top-0 h-1 bg-gradient-to-r ${sectionThemes.settlements.gradient}`} />
             <CardHeader>
               <CardTitle className="text-base flex items-center gap-2">
                 <Calculator className="h-4 w-4" />

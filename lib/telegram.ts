@@ -105,6 +105,9 @@ export function mainMenuKeyboard() {
       { text: "📝 New Settlement", callback_data: "new_settlement" },
       { text: "📋 Recent Settlements", callback_data: "recent_settlements" },
     ],
+    [
+      { text: "📅 Attendance", callback_data: "attendance" },
+    ],
   ]);
 }
 

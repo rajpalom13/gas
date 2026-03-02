@@ -3,12 +3,14 @@
 import { useEffect, useState } from "react";
 import { useSession } from "next-auth/react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Plus, Pencil, Trash2, Contact, Search, Loader2, Banknote } from "lucide-react";
+import { Plus, Pencil, Trash2, Contact, Search, Loader2, Banknote, Users } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { PageHeader } from "@/components/ui/page-header";
+import { sectionThemes } from "@/lib/theme";
 import {
   Dialog,
   DialogContent,
@@ -170,7 +172,12 @@ export default function CustomersPage() {
   if (loading) {
     return (
       <div className="space-y-6">
-        <h1 className="text-2xl font-bold">Customer Database</h1>
+        <PageHeader
+          icon={<Users className="h-5 w-5" />}
+          title="Customer Database"
+          subtitle="Loading customers..."
+          gradient={sectionThemes.customers.gradient}
+        />
         <Skeleton className="h-10 w-full rounded-xl" />
         <div className="space-y-3">
           {[...Array(5)].map((_, i) => (
@@ -183,16 +190,23 @@ export default function CustomersPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between flex-wrap gap-4">
-        <div>
-          <h1 className="text-2xl font-bold">Customer Database</h1>
-          <p className="text-zinc-500 text-sm mt-1">{customers.length} active customers</p>
-        </div>
-        <Button onClick={() => { setEditingId(null); setForm({ name: "", phone: "", address: "", notes: "" }); setDialogOpen(true); }}>
-          <Plus className="h-4 w-4" />
-          Add Customer
-        </Button>
-      </div>
+      <PageHeader
+        icon={<Users className="h-5 w-5" />}
+        title="Customer Database"
+        subtitle={`${customers.length} active customers`}
+        gradient={sectionThemes.customers.gradient}
+        badge={
+          <Badge variant="secondary" className="gap-1">
+            {customers.length} customers
+          </Badge>
+        }
+        actions={
+          <Button onClick={() => { setEditingId(null); setForm({ name: "", phone: "", address: "", notes: "" }); setDialogOpen(true); }}>
+            <Plus className="h-4 w-4" />
+            Add Customer
+          </Button>
+        }
+      />
 
       <div className="relative">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-400" />
@@ -217,7 +231,7 @@ export default function CustomersPage() {
             >
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
-                  <div className="h-9 w-9 rounded-full bg-zinc-100 dark:bg-zinc-800 flex items-center justify-center text-sm font-bold">
+                  <div className="h-9 w-9 rounded-full bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-300 flex items-center justify-center text-sm font-bold">
                     {customer.name.charAt(0)}
                   </div>
                   <div>
@@ -298,11 +312,13 @@ export default function CustomersPage() {
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
                     exit={{ opacity: 0 }}
-                    className="border-b border-zinc-100 dark:border-zinc-800"
+                    className={`border-b border-zinc-100 dark:border-zinc-800 ${
+                      hasDebt(customer) ? "bg-red-50/40 dark:bg-red-950/20" : ""
+                    }`}
                   >
                     <TableCell className="font-medium">
                       <div className="flex items-center gap-3">
-                        <div className="h-8 w-8 rounded-full bg-zinc-100 dark:bg-zinc-800 flex items-center justify-center text-xs font-bold">
+                        <div className="h-8 w-8 rounded-full bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-300 flex items-center justify-center text-xs font-bold">
                           {customer.name.charAt(0)}
                         </div>
                         {customer.name}

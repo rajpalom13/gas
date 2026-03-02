@@ -17,6 +17,8 @@ import {
   formatDateShort,
 } from "@/lib/telegram";
 import { parseUPIScreenshot } from "@/lib/ocr";
+import { computeSettlement, normalizeSettlement } from "@/lib/settlement-utils";
+import { Attendance } from "@/lib/models/Attendance";
 
 const WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET || "";
 const TELEGRAM_BOT_USER_ID = process.env.TELEGRAM_BOT_USER_ID || "";
@@ -224,14 +226,10 @@ async function handleCallback(query: {
     const size = data.replace("settle_cyl_", "");
     const session = await getSession(chatId);
     if (!session) return;
-    const isOCR = session.step === "ocr_settle_cylinder";
     session.data.currentCylinder = size;
-    session.step = isOCR ? "ocr_settle_qty" : "settle_qty";
+    session.step = "settle_qty";
     await setSession(chatId, session);
-    await sendMessage(
-      chatId,
-      `📝 Enter <b>quantity</b> for ${size} cylinder:`
-    );
+    await sendMessage(chatId, `📝 Enter <b>quantity</b> for ${size} cylinder:`);
     return;
   }
 
@@ -241,10 +239,26 @@ async function handleCallback(query: {
       await sendMessage(chatId, "⚠️ Add at least one cylinder first.");
       return;
     }
-    const isOCR = session.step === "ocr_settle_cylinder";
-    session.step = isOCR ? "ocr_settle_add_payment" : "settle_add_payment";
-    await setSession(chatId, session);
-    await sendMessage(chatId, "💰 Enter <b>add payment</b> (extra collected) amount (or 0):");
+
+    // Get unique cylinder sizes (excluding full-DBC) for empty cylinder questions
+    const items = session.data.items as { cylinderSize: string; quantity: number; isNewConnection?: boolean }[];
+    const sizesForEmpties = Array.from(new Set(items.filter(i => !i.isNewConnection).map(i => i.cylinderSize)));
+
+    if (sizesForEmpties.length > 0) {
+      session.data.emptySizesToAsk = sizesForEmpties;
+      session.data.emptyCylindersReturned = [];
+      const firstSize = sizesForEmpties[0];
+      session.step = `settle_empty_${firstSize}`;
+      await setSession(chatId, session);
+      await sendMessage(chatId, `🔄 How many <b>${firstSize}</b> empty cylinders returned? (or 0):`);
+    } else {
+      // All items are DBC, skip empty cylinders
+      session.data.emptyCylindersReturned = [];
+      session.data.transactions = [];
+      session.step = "settle_transactions_menu";
+      await setSession(chatId, session);
+      await showTransactionsMenu(chatId, session);
+    }
     return;
   }
 
@@ -256,6 +270,126 @@ async function handleCallback(query: {
   if (data === "settle_cancel") {
     await clearSession(chatId);
     await sendMessage(chatId, "❌ Settlement cancelled.", mainMenuKeyboard());
+    return;
+  }
+
+  // DBC callbacks
+  if (data === "settle_dbc_yes" || data === "settle_dbc_no") {
+    const session = await getSession(chatId);
+    if (!session) return;
+    const isNewConnection = data === "settle_dbc_yes";
+    const items = (session.data.items as { cylinderSize: string; quantity: number; isNewConnection?: boolean }[]) || [];
+    items.push({
+      cylinderSize: session.data.currentCylinder as string,
+      quantity: session.data.currentQty as number,
+      isNewConnection,
+    });
+    session.data.items = items;
+    session.step = "settle_cylinder";
+    await setSession(chatId, session);
+    await handleSettleCylinderSelect(chatId);
+    return;
+  }
+
+  // Transaction menu callbacks
+  if (data === "settle_tx_credit") {
+    const session = await getSession(chatId);
+    if (!session) return;
+    session.data.txType = "credit";
+    session.step = "settle_tx_category";
+    await setSession(chatId, session);
+    await sendMessage(
+      chatId,
+      "➕ Select <b>credit</b> category:",
+      inlineKeyboard([
+        [{ text: "💳 Paytm", callback_data: "settle_tx_cat_Paytm" }],
+        [{ text: "💵 Cash", callback_data: "settle_tx_cat_Cash" }],
+        [{ text: "📱 UPI", callback_data: "settle_tx_cat_UPI" }],
+        [{ text: "📲 PhonePe", callback_data: "settle_tx_cat_PhonePe" }],
+        [{ text: "📋 Other", callback_data: "settle_tx_cat_Other" }],
+        [{ text: "↩️ Back", callback_data: "settle_tx_back" }],
+      ])
+    );
+    return;
+  }
+
+  if (data === "settle_tx_debit") {
+    const session = await getSession(chatId);
+    if (!session) return;
+    session.data.txType = "debit";
+    session.step = "settle_tx_category";
+    await setSession(chatId, session);
+    await sendMessage(
+      chatId,
+      "➖ Select <b>debit</b> category:",
+      inlineKeyboard([
+        [{ text: "⛽ Fuel", callback_data: "settle_tx_cat_Fuel" }],
+        [{ text: "💸 Discount", callback_data: "settle_tx_cat_Discount" }],
+        [{ text: "↩️ Return", callback_data: "settle_tx_cat_Return" }],
+        [{ text: "🔧 Maintenance", callback_data: "settle_tx_cat_Maintenance" }],
+        [{ text: "📋 Other", callback_data: "settle_tx_cat_Other" }],
+        [{ text: "↩️ Back", callback_data: "settle_tx_back" }],
+      ])
+    );
+    return;
+  }
+
+  if (data.startsWith("settle_tx_cat_")) {
+    const category = data.replace("settle_tx_cat_", "");
+    const session = await getSession(chatId);
+    if (!session) return;
+    session.data.txCategory = category;
+    session.step = "settle_tx_amount";
+    await setSession(chatId, session);
+    const txType = session.data.txType as string;
+    await sendMessage(chatId, `Enter <b>${txType === "credit" ? "credit" : "debit"}</b> amount for <b>${category}</b>:`);
+    return;
+  }
+
+  if (data === "settle_tx_back") {
+    const session = await getSession(chatId);
+    if (!session) return;
+    session.step = "settle_transactions_menu";
+    await setSession(chatId, session);
+    await showTransactionsMenu(chatId, session);
+    return;
+  }
+
+  if (data === "settle_tx_done") {
+    const session = await getSession(chatId);
+    if (!session) return;
+    if (session.data.isOCR) {
+      // Skip actual cash input, already have it from OCR
+      session.step = "settle_denomination";
+      await setSession(chatId, session);
+      await sendMessage(
+        chatId,
+        `💵 Actual cash (from UPI): <b>${formatINR(session.data.actualCashReceived as number)}</b>\n\nEnter <b>cash denominations</b> (optional):\n\nFormat: <code>500x2, 200x1, 100x5</code>\n\nOr send <b>-</b> to skip.`
+      );
+    } else {
+      session.step = "settle_actual_cash";
+      await setSession(chatId, session);
+      await sendMessage(chatId, "💵 Enter <b>actual cash received</b>:");
+    }
+    return;
+  }
+
+  // Attendance
+  if (data === "attendance") {
+    await handleAttendanceEdit(chatId, messageId);
+    return;
+  }
+
+  if (data.startsWith("att_mark_")) {
+    const parts = data.replace("att_mark_", "").split("_");
+    const status = parts.pop()!;
+    const staffId = parts.join("_");
+    await handleAttendanceMark(chatId, messageId, staffId, status);
+    return;
+  }
+
+  if (data === "att_all_present") {
+    await handleAttendanceAllPresent(chatId, messageId);
     return;
   }
 
@@ -489,50 +623,83 @@ async function handleSessionInput(
       await sendMessage(chatId, "⚠️ Enter a valid quantity (> 0):");
       return;
     }
-    const items = (session.data.items as { cylinderSize: string; quantity: number }[]) || [];
-    items.push({
-      cylinderSize: session.data.currentCylinder as string,
-      quantity: qty,
+    session.data.currentQty = qty;
+    session.step = "settle_dbc";
+    await setSession(chatId, session);
+    await sendMessage(
+      chatId,
+      `Is this a <b>New Connection (DBC)</b>?\n\n${session.data.currentCylinder} × ${qty}`,
+      inlineKeyboard([
+        [
+          { text: "📦 Regular", callback_data: "settle_dbc_no" },
+          { text: "🆕 New Connection (DBC)", callback_data: "settle_dbc_yes" },
+        ],
+      ])
+    );
+    return;
+  }
+
+  // DBC question for each item (handled by callback, not text input)
+  if (session.step === "settle_dbc") {
+    return;
+  }
+
+  // Empty cylinder return steps
+  if (session.step.startsWith("settle_empty_")) {
+    const cylinderSize = session.step.replace("settle_empty_", "");
+    const qty = parseInt(text);
+    if (isNaN(qty) || qty < 0) {
+      await sendMessage(chatId, "⚠️ Enter a valid number (>= 0):");
+      return;
+    }
+    const emptyCylindersReturned = (session.data.emptyCylindersReturned as { cylinderSize: string; quantity: number }[]) || [];
+    if (qty > 0) {
+      emptyCylindersReturned.push({ cylinderSize, quantity: qty });
+    }
+    session.data.emptyCylindersReturned = emptyCylindersReturned;
+
+    // Check if there are more sizes to ask about
+    const remainingSizes = (session.data.emptySizesToAsk as string[]) || [];
+    const nextIdx = remainingSizes.indexOf(cylinderSize) + 1;
+    if (nextIdx < remainingSizes.length) {
+      const nextSize = remainingSizes[nextIdx];
+      session.step = `settle_empty_${nextSize}`;
+      await setSession(chatId, session);
+      await sendMessage(chatId, `🔄 How many <b>${nextSize}</b> empty cylinders returned? (or 0):`);
+    } else {
+      // Move to transactions menu
+      session.data.transactions = session.data.transactions || [];
+      session.step = "settle_transactions_menu";
+      await setSession(chatId, session);
+      await showTransactionsMenu(chatId, session);
+    }
+    return;
+  }
+
+  // Transaction amount input
+  if (session.step === "settle_tx_amount") {
+    const val = parseFloat(text);
+    if (isNaN(val) || val <= 0) {
+      await sendMessage(chatId, "⚠️ Enter a valid amount (> 0):");
+      return;
+    }
+    const transactions = (session.data.transactions as { type: string; category: string; amount: number }[]) || [];
+    transactions.push({
+      type: session.data.txType as string,
+      category: session.data.txCategory as string,
+      amount: val,
     });
-    session.data.items = items;
-    session.step = "settle_cylinder";
+    session.data.transactions = transactions;
+    session.step = "settle_transactions_menu";
     await setSession(chatId, session);
-    await handleSettleCylinderSelect(chatId);
+    await showTransactionsMenu(chatId, session);
     return;
   }
 
-  // Add payment step
-  if (session.step === "settle_add_payment") {
-    const val = parseFloat(text) || 0;
-    session.data.addPayment = val;
-    session.step = "settle_reduce_payment";
-    await setSession(chatId, session);
-    await sendMessage(chatId, "💸 Enter <b>reduce payment</b> (discounts/returns) amount (or 0):");
-    return;
-  }
-
-  // Reduce payment step
-  if (session.step === "settle_reduce_payment") {
-    const val = parseFloat(text) || 0;
-    session.data.reducePayment = val;
-    session.step = "settle_expenses";
-    await setSession(chatId, session);
-    await sendMessage(chatId, "💰 Enter <b>expenses</b> amount (or 0):");
-    return;
-  }
-
-  if (session.step === "settle_expenses") {
-    const val = parseFloat(text) || 0;
-    session.data.expenses = val;
-    session.step = "settle_actual_cash";
-    await setSession(chatId, session);
-    await sendMessage(chatId, "💵 Enter <b>actual cash received</b>:");
-    return;
-  }
-
+  // Actual cash received
   if (session.step === "settle_actual_cash") {
     const val = parseFloat(text) || 0;
-    session.data.actualCash = val;
+    session.data.actualCashReceived = val;
     session.step = "settle_denomination";
     await setSession(chatId, session);
     await sendMessage(
@@ -572,8 +739,7 @@ async function handleSessionInput(
   if (session.step === "settle_notes") {
     session.data.notes = text === "-" ? "" : text;
 
-    // Calculate summary
-    const items = session.data.items as { cylinderSize: string; quantity: number }[];
+    const items = session.data.items as { cylinderSize: string; quantity: number; isNewConnection?: boolean }[];
     let grossRevenue = 0;
     const itemLines: string[] = [];
 
@@ -585,24 +751,36 @@ async function handleSessionInput(
       const total = item.quantity * price;
       grossRevenue += total;
       itemLines.push(
-        `  ${item.cylinderSize}: ${item.quantity} × ${formatINR(price)} = ${formatINR(total)}`
+        `  ${item.cylinderSize}: ${item.quantity} × ${formatINR(price)} = ${formatINR(total)}${item.isNewConnection ? " (DBC)" : ""}`
       );
     }
 
-    const addPayment = (session.data.addPayment as number) || 0;
-    const reducePayment = (session.data.reducePayment as number) || 0;
-    const expenses = (session.data.expenses as number) || 0;
-    const actualCash = (session.data.actualCash as number) || 0;
-    const expectedCash = grossRevenue + addPayment - reducePayment - expenses;
-    const shortage = Math.max(0, expectedCash - actualCash);
+    const transactions = (session.data.transactions as { type: string; category: string; amount: number }[]) || [];
+    const actualCashReceived = (session.data.actualCashReceived as number) || 0;
+
+    const computed = computeSettlement(
+      items.map(i => ({
+        cylinderSize: i.cylinderSize,
+        quantity: i.quantity,
+        pricePerUnit: (session.data.resolvedPrices as Record<string, number>)[i.cylinderSize] || 0,
+        total: i.quantity * ((session.data.resolvedPrices as Record<string, number>)[i.cylinderSize] || 0),
+        isNewConnection: i.isNewConnection,
+      })),
+      transactions.map(t => ({ type: t.type as "credit" | "debit", category: t.category, amount: t.amount })),
+      actualCashReceived
+    );
+
     const denominationTotal = (session.data.denominationTotal as number) || 0;
     const dateStr = session.data.date ? formatDateShort(session.data.date as string) : formatDateShort(new Date());
+    const emptyCylindersReturned = (session.data.emptyCylindersReturned as { cylinderSize: string; quantity: number }[]) || [];
 
     session.data.grossRevenue = grossRevenue;
-    session.data.expectedCash = expectedCash;
-    session.data.shortage = shortage;
+    session.data.computed = computed;
     session.step = "settle_confirm";
     await setSession(chatId, session);
+
+    const creditTxns = transactions.filter(t => t.type === "credit");
+    const debitTxns = transactions.filter(t => t.type === "debit");
 
     const summary = [
       `📝 <b>Settlement Summary</b>`,
@@ -614,19 +792,23 @@ async function handleSessionInput(
       ...itemLines,
       ``,
       `💰 Gross Revenue: <b>${formatINR(grossRevenue)}</b>`,
-      addPayment > 0 ? `➕ Add Payment: ${formatINR(addPayment)}` : null,
-      reducePayment > 0 ? `➖ Reduce Payment: ${formatINR(reducePayment)}` : null,
-      `📉 Expenses: ${formatINR(expenses)}`,
-      `📊 Expected Cash: ${formatINR(expectedCash)}`,
-      `💵 Actual Cash: ${formatINR(actualCash)}`,
+      creditTxns.length > 0 ? `\n➕ <b>Credits:</b>` : null,
+      ...creditTxns.map(t => `  ${t.category}: ${formatINR(t.amount)}`),
+      creditTxns.length > 0 ? `  Total Credits: <b>${formatINR(computed.totalCredits)}</b>` : null,
+      debitTxns.length > 0 ? `\n➖ <b>Debits:</b>` : null,
+      ...debitTxns.map(t => `  ${t.category}: ${formatINR(t.amount)}`),
+      debitTxns.length > 0 ? `  Total Debits: <b>${formatINR(computed.totalDebits)}</b>` : null,
+      ``,
+      `📊 Net Revenue: <b>${formatINR(computed.netRevenue)}</b>`,
+      `💵 Actual Cash: ${formatINR(actualCashReceived)}`,
       denominationTotal > 0 ? `🏷️ Denomination Total: ${formatINR(denominationTotal)}` : null,
-      denominationTotal > 0 && denominationTotal !== actualCash
-        ? `⚠️ Denomination mismatch!`
-        : null,
-      shortage > 0
-        ? `⚠️ Shortage: <b>${formatINR(shortage)}</b>`
-        : `✅ No shortage`,
-      session.data.notes ? `📝 Notes: ${session.data.notes}` : null,
+      denominationTotal > 0 && denominationTotal !== actualCashReceived ? `⚠️ Denomination mismatch!` : null,
+      computed.amountPending > 0
+        ? `⚠️ Amount Pending: <b>${formatINR(computed.amountPending)}</b>`
+        : `✅ No pending amount`,
+      emptyCylindersReturned.length > 0 ? `\n🔄 <b>Empty Cylinders Returned:</b>` : null,
+      ...emptyCylindersReturned.map(e => `  ${e.cylinderSize}: ${e.quantity}`),
+      session.data.notes ? `\n📝 Notes: ${session.data.notes}` : null,
     ].filter(Boolean).join("\n");
 
     await sendMessage(
@@ -642,110 +824,6 @@ async function handleSessionInput(
     return;
   }
 
-  // ── OCR Settlement flow (actual cash pre-filled) ──
-  if (session.step === "ocr_settle_qty") {
-    const qty = parseInt(text);
-    if (isNaN(qty) || qty <= 0) {
-      await sendMessage(chatId, "⚠️ Enter a valid quantity (> 0):");
-      return;
-    }
-    const items = (session.data.items as { cylinderSize: string; quantity: number }[]) || [];
-    items.push({
-      cylinderSize: session.data.currentCylinder as string,
-      quantity: qty,
-    });
-    session.data.items = items;
-    session.step = "ocr_settle_cylinder";
-    await setSession(chatId, session);
-    await handleOCRCylinderSelect(chatId);
-    return;
-  }
-
-  // OCR add payment
-  if (session.step === "ocr_settle_add_payment") {
-    const val = parseFloat(text) || 0;
-    session.data.addPayment = val;
-    session.step = "ocr_settle_reduce_payment";
-    await setSession(chatId, session);
-    await sendMessage(chatId, "💸 Enter <b>reduce payment</b> (discounts/returns) amount (or 0):");
-    return;
-  }
-
-  // OCR reduce payment
-  if (session.step === "ocr_settle_reduce_payment") {
-    const val = parseFloat(text) || 0;
-    session.data.reducePayment = val;
-    session.step = "ocr_settle_expenses";
-    await setSession(chatId, session);
-    await sendMessage(chatId, "💰 Enter <b>expenses</b> amount (or 0):");
-    return;
-  }
-
-  if (session.step === "ocr_settle_expenses") {
-    const val = parseFloat(text) || 0;
-    session.data.expenses = val;
-
-    // Skip actual cash input — use OCR amount
-    const actualCash = session.data.actualCash as number;
-    const items = session.data.items as { cylinderSize: string; quantity: number }[];
-    let grossRevenue = 0;
-    const itemLines: string[] = [];
-
-    session.data.resolvedPrices = {};
-    for (const item of items) {
-      const inv = await Inventory.findOne({ cylinderSize: item.cylinderSize }).lean();
-      const price = inv?.pricePerUnit || 0;
-      (session.data.resolvedPrices as Record<string, number>)[item.cylinderSize] = price;
-      const total = item.quantity * price;
-      grossRevenue += total;
-      itemLines.push(
-        `  ${item.cylinderSize}: ${item.quantity} × ${formatINR(price)} = ${formatINR(total)}`
-      );
-    }
-
-    const addPayment = (session.data.addPayment as number) || 0;
-    const reducePayment = (session.data.reducePayment as number) || 0;
-    const expectedCash = grossRevenue + addPayment - reducePayment - val;
-    const shortage = Math.max(0, expectedCash - actualCash);
-
-    session.data.grossRevenue = grossRevenue;
-    session.data.expectedCash = expectedCash;
-    session.data.shortage = shortage;
-    session.step = "settle_confirm";
-    await setSession(chatId, session);
-
-    const summary = [
-      `📝 <b>Settlement Summary</b>`,
-      ``,
-      `👤 Staff: <b>${session.data.staffName}</b>`,
-      `📅 Date: ${formatDateShort(new Date())}`,
-      ``,
-      `📦 <b>Cylinders:</b>`,
-      ...itemLines,
-      ``,
-      `💰 Gross Revenue: <b>${formatINR(grossRevenue)}</b>`,
-      addPayment > 0 ? `➕ Add Payment: ${formatINR(addPayment)}` : null,
-      reducePayment > 0 ? `➖ Reduce Payment: ${formatINR(reducePayment)}` : null,
-      `📉 Expenses: ${formatINR(val)}`,
-      `📊 Expected Cash: ${formatINR(expectedCash)}`,
-      `💵 Actual Cash (from UPI): ${formatINR(actualCash)}`,
-      shortage > 0
-        ? `⚠️ Shortage: <b>${formatINR(shortage)}</b>`
-        : `✅ No shortage`,
-    ].filter(Boolean).join("\n");
-
-    await sendMessage(
-      chatId,
-      summary,
-      inlineKeyboard([
-        [
-          { text: "✅ Confirm", callback_data: "settle_confirm" },
-          { text: "❌ Cancel", callback_data: "settle_cancel" },
-        ],
-      ])
-    );
-    return;
-  }
 }
 
 // ─── FEATURE HANDLERS ────────────────────────────────────────
@@ -773,9 +851,22 @@ async function handleDashboard(chatId: number) {
     0
   );
   const totalRevenue = settlements.reduce((a, s) => a + s.grossRevenue, 0);
-  const totalExpenses = settlements.reduce((a, s) => a + s.expenses, 0);
-  const totalShortage = settlements.reduce((a, s) => a + s.shortage, 0);
-  const totalCash = settlements.reduce((a, s) => a + s.actualCash, 0);
+  const totalCredits = settlements.reduce((a, s) => {
+    const n = normalizeSettlement(s as unknown as Record<string, unknown>);
+    return a + ((n.totalCredits as number) || 0);
+  }, 0);
+  const totalDebits = settlements.reduce((a, s) => {
+    const n = normalizeSettlement(s as unknown as Record<string, unknown>);
+    return a + ((n.totalDebits as number) || 0);
+  }, 0);
+  const totalAmountPending = settlements.reduce((a, s) => {
+    const n = normalizeSettlement(s as unknown as Record<string, unknown>);
+    return a + ((n.amountPending as number) || 0);
+  }, 0);
+  const totalCash = settlements.reduce((a, s) => {
+    const n = normalizeSettlement(s as unknown as Record<string, unknown>);
+    return a + ((n.actualCashReceived as number) || 0);
+  }, 0);
   const totalDebt = totalDebtAgg[0]?.total || 0;
 
   const invLines = inventory
@@ -787,8 +878,9 @@ async function handleDashboard(chatId: number) {
     ``,
     `📦 Deliveries: <b>${totalDeliveries}</b> cylinders`,
     `💰 Revenue: <b>${formatINR(totalRevenue)}</b>`,
-    `📉 Expenses: <b>${formatINR(totalExpenses)}</b>`,
-    `⚠️ Shortage: <b>${formatINR(totalShortage)}</b>`,
+    `➕ Credits: <b>${formatINR(totalCredits)}</b>`,
+    `➖ Debits: <b>${formatINR(totalDebits)}</b>`,
+    `⚠️ Amount Pending: <b>${formatINR(totalAmountPending)}</b>`,
     `💵 Cash Collected: <b>${formatINR(totalCash)}</b>`,
     ``,
     `👥 Active Staff: ${staffCount}`,
@@ -831,9 +923,22 @@ async function handleDashboardEdit(chatId: number, messageId: number) {
     0
   );
   const totalRevenue = settlements.reduce((a, s) => a + s.grossRevenue, 0);
-  const totalExpenses = settlements.reduce((a, s) => a + s.expenses, 0);
-  const totalShortage = settlements.reduce((a, s) => a + s.shortage, 0);
-  const totalCash = settlements.reduce((a, s) => a + s.actualCash, 0);
+  const totalCredits = settlements.reduce((a, s) => {
+    const n = normalizeSettlement(s as unknown as Record<string, unknown>);
+    return a + ((n.totalCredits as number) || 0);
+  }, 0);
+  const totalDebits = settlements.reduce((a, s) => {
+    const n = normalizeSettlement(s as unknown as Record<string, unknown>);
+    return a + ((n.totalDebits as number) || 0);
+  }, 0);
+  const totalAmountPending = settlements.reduce((a, s) => {
+    const n = normalizeSettlement(s as unknown as Record<string, unknown>);
+    return a + ((n.amountPending as number) || 0);
+  }, 0);
+  const totalCash = settlements.reduce((a, s) => {
+    const n = normalizeSettlement(s as unknown as Record<string, unknown>);
+    return a + ((n.actualCashReceived as number) || 0);
+  }, 0);
   const totalDebt = totalDebtAgg[0]?.total || 0;
 
   const invLines = inventory
@@ -845,8 +950,9 @@ async function handleDashboardEdit(chatId: number, messageId: number) {
     ``,
     `📦 Deliveries: <b>${totalDeliveries}</b> cylinders`,
     `💰 Revenue: <b>${formatINR(totalRevenue)}</b>`,
-    `📉 Expenses: <b>${formatINR(totalExpenses)}</b>`,
-    `⚠️ Shortage: <b>${formatINR(totalShortage)}</b>`,
+    `➕ Credits: <b>${formatINR(totalCredits)}</b>`,
+    `➖ Debits: <b>${formatINR(totalDebits)}</b>`,
+    `⚠️ Amount Pending: <b>${formatINR(totalAmountPending)}</b>`,
     `💵 Cash Collected: <b>${formatINR(totalCash)}</b>`,
     ``,
     `👥 Active Staff: ${staffCount}`,
@@ -992,10 +1098,11 @@ async function handleStaffDetailEdit(
 
   const settlementLines = recentSettlements.length
     ? recentSettlements
-        .map(
-          (s) =>
-            `  ${formatDateShort(s.date)} — Revenue: ${formatINR(s.grossRevenue)}${s.shortage > 0 ? ` ⚠️ Shortage: ${formatINR(s.shortage)}` : ""}`
-        )
+        .map((s) => {
+          const n = normalizeSettlement(s as unknown as Record<string, unknown>);
+          const pending = (n.amountPending as number) || 0;
+          return `  ${formatDateShort(s.date)} — Revenue: ${formatINR(s.grossRevenue)}${pending > 0 ? ` ⚠️ Pending: ${formatINR(pending)}` : ""}`;
+        })
         .join("\n")
     : "  No settlements yet";
 
@@ -1040,20 +1147,25 @@ async function handleStaffLedgerEdit(
     .lean();
 
   const totalRevenue = settlements.reduce((a, s) => a + s.grossRevenue, 0);
-  const totalShortage = settlements.reduce((a, s) => a + s.shortage, 0);
+  const totalAmountPending = settlements.reduce((a, s) => {
+    const n = normalizeSettlement(s as unknown as Record<string, unknown>);
+    return a + ((n.amountPending as number) || 0);
+  }, 0);
 
   const lines = settlements.map((s) => {
+    const n = normalizeSettlement(s as unknown as Record<string, unknown>);
+    const pending = (n.amountPending as number) || 0;
     const cylinders = s.items
       .map((i: { quantity: number; cylinderSize: string }) => `${i.quantity}×${i.cylinderSize}`)
       .join(", ");
-    return `${formatDateShort(s.date)} | ${cylinders} | ${formatINR(s.grossRevenue)}${s.shortage > 0 ? ` | ⚠️${formatINR(s.shortage)}` : ""}`;
+    return `${formatDateShort(s.date)} | ${cylinders} | ${formatINR(s.grossRevenue)}${pending > 0 ? ` | ⚠️${formatINR(pending)}` : ""}`;
   });
 
   const msg = [
     `📋 <b>Ledger: ${staff.name}</b>`,
     ``,
     `💰 Total Revenue: ${formatINR(totalRevenue)}`,
-    `⚠️ Total Shortage: ${formatINR(totalShortage)}`,
+    `⚠️ Total Pending: ${formatINR(totalAmountPending)}`,
     `🔴 Current Debt: ${formatINR(staff.debtBalance)}`,
     ``,
     `<b>Last ${settlements.length} Settlements:</b>`,
@@ -1105,11 +1217,11 @@ async function handleSettleCylinderSelect(chatId: number) {
   const session = await getSession(chatId);
   if (!session) return;
 
-  const items = session.data.items as { cylinderSize: string; quantity: number }[];
+  const items = session.data.items as { cylinderSize: string; quantity: number; isNewConnection?: boolean }[];
   const inventory = await Inventory.find({}).sort({ cylinderSize: 1 }).lean();
 
   const currentItems = items.length
-    ? `\n\n📦 Added so far:\n${items.map((i) => `  ${i.quantity}× ${i.cylinderSize}`).join("\n")}`
+    ? `\n\n📦 Added so far:\n${items.map((i) => `  ${i.quantity}× ${i.cylinderSize}${i.isNewConnection ? " (DBC)" : ""}`).join("\n")}`
     : "";
 
   await sendMessage(
@@ -1132,59 +1244,42 @@ async function handleSettleConfirm(chatId: number) {
   const session = await getSession(chatId);
   if (!session) return;
 
-  const { staffId, items, expenses, actualCash, addPayment, reducePayment, grossRevenue, expectedCash, shortage, date, notes, denominations, denominationTotal } =
-    session.data as {
-      staffId: string;
-      items: { cylinderSize: string; quantity: number }[];
-      expenses: number;
-      actualCash: number;
-      addPayment: number;
-      reducePayment: number;
-      grossRevenue: number;
-      expectedCash: number;
-      shortage: number;
-      date?: string;
-      notes?: string;
-      denominations?: { note: number; count: number; total: number }[];
-      denominationTotal?: number;
-    };
-
-  const resolvedPrices = (session.data as { resolvedPrices?: Record<string, number> }).resolvedPrices;
+  const sessionData = session.data;
+  const staffId = sessionData.staffId as string;
+  const items = sessionData.items as { cylinderSize: string; quantity: number; isNewConnection?: boolean }[];
+  const date = sessionData.date as string | undefined;
+  const notes = sessionData.notes as string | undefined;
+  const denominations = sessionData.denominations as { note: number; count: number; total: number }[] | undefined;
+  const denominationTotal = sessionData.denominationTotal as number | undefined;
+  const resolvedPrices = sessionData.resolvedPrices as Record<string, number> | undefined;
 
   try {
+    let resultGrossRevenue = 0;
+    let resultAmountPending = 0;
+    let resultActualCash = 0;
+
     await withTransaction(async (txSession) => {
-      // Validate stock and process items
+      // Build V3 settlement items with prices and DBC
       const processedItems = [];
       for (const item of items) {
         const price = resolvedPrices?.[item.cylinderSize];
         let pricePerUnit: number;
 
-        if (price === undefined) {
-          // Fallback to DB query
-          const inv = await Inventory.findOne({ cylinderSize: item.cylinderSize }).session(txSession);
-          if (!inv) continue;
-          if (inv.fullStock < item.quantity) {
-            throw new Error(`Insufficient stock for ${item.cylinderSize}: available ${inv.fullStock}, requested ${item.quantity}`);
-          }
-          pricePerUnit = inv.pricePerUnit;
-        } else {
-          // Validate stock even when using resolved price
-          const inv = await Inventory.findOne({ cylinderSize: item.cylinderSize }).session(txSession);
-          if (!inv) continue;
-          if (inv.fullStock < item.quantity) {
-            throw new Error(`Insufficient stock for ${item.cylinderSize}: available ${inv.fullStock}, requested ${item.quantity}`);
-          }
-          pricePerUnit = price;
+        const inv = await Inventory.findOne({ cylinderSize: item.cylinderSize }).session(txSession);
+        if (!inv) continue;
+        if (inv.fullStock < item.quantity) {
+          throw new Error(`Insufficient stock for ${item.cylinderSize}: available ${inv.fullStock}, requested ${item.quantity}`);
         }
+        pricePerUnit = price !== undefined ? price : inv.pricePerUnit;
 
         processedItems.push({
           cylinderSize: item.cylinderSize,
           quantity: item.quantity,
           pricePerUnit,
           total: item.quantity * pricePerUnit,
+          isNewConnection: item.isNewConnection || false,
         });
 
-        // Update inventory
         await Inventory.findOneAndUpdate(
           { cylinderSize: item.cylinderSize },
           { $inc: { fullStock: -item.quantity, emptyStock: item.quantity } },
@@ -1192,22 +1287,45 @@ async function handleSettleConfirm(chatId: number) {
         );
       }
 
+      const transactions = (sessionData.transactions as { type: string; category: string; amount: number }[]) || [];
+      const actualCashReceived = (sessionData.actualCashReceived as number) || (sessionData.actualCash as number) || 0;
+      const emptyCylindersReturned = (sessionData.emptyCylindersReturned as { cylinderSize: string; quantity: number }[]) || [];
+
+      const computed = computeSettlement(
+        processedItems,
+        transactions.map(t => ({ type: t.type as "credit" | "debit", category: t.category, amount: t.amount })),
+        actualCashReceived
+      );
+
+      resultGrossRevenue = computed.grossRevenue;
+      resultAmountPending = computed.amountPending;
+      resultActualCash = actualCashReceived;
+
       await Settlement.create(
         [
           {
             staff: staffId,
             date: date ? new Date(date) : new Date(),
             items: processedItems,
-            grossRevenue,
-            addPayment: addPayment || 0,
-            reducePayment: reducePayment || 0,
-            expenses: expenses || 0,
-            expectedCash,
-            actualCash: actualCash || 0,
-            shortage: shortage || 0,
+            grossRevenue: computed.grossRevenue,
+            transactions: transactions,
+            totalCredits: computed.totalCredits,
+            totalDebits: computed.totalDebits,
+            netRevenue: computed.netRevenue,
+            actualCashReceived,
+            amountPending: computed.amountPending,
+            emptyCylindersReturned,
             notes: notes || "",
             denominations: denominations || [],
             denominationTotal: denominationTotal || 0,
+            schemaVersion: 3,
+            // Legacy fields for backward compat
+            addPayment: computed.addPayment,
+            reducePayment: computed.reducePayment,
+            expenses: computed.expenses,
+            expectedCash: computed.expectedCash,
+            actualCash: actualCashReceived,
+            shortage: computed.shortage,
             createdBy: TELEGRAM_BOT_USER_ID || undefined,
           },
         ],
@@ -1215,8 +1333,8 @@ async function handleSettleConfirm(chatId: number) {
       );
 
       // Update staff debt
-      if (shortage > 0) {
-        await Staff.findByIdAndUpdate(staffId, { $inc: { debtBalance: shortage } }, { session: txSession });
+      if (computed.amountPending > 0) {
+        await Staff.findByIdAndUpdate(staffId, { $inc: { debtBalance: computed.amountPending } }, { session: txSession });
       }
     });
 
@@ -1224,7 +1342,7 @@ async function handleSettleConfirm(chatId: number) {
 
     await sendMessage(
       chatId,
-      `✅ <b>Settlement Created!</b>\n\n💰 Revenue: ${formatINR(grossRevenue)}\n💵 Cash: ${formatINR(actualCash)}${shortage > 0 ? `\n⚠️ Shortage: ${formatINR(shortage)} added to debt` : "\n✅ No shortage"}`,
+      `✅ <b>Settlement Created!</b>\n\n💰 Revenue: ${formatINR(resultGrossRevenue)}\n💵 Cash: ${formatINR(resultActualCash)}${resultAmountPending > 0 ? `\n⚠️ Pending: ${formatINR(resultAmountPending)} added to debt` : "\n✅ No pending amount"}`,
       inlineKeyboard([
         [{ text: "📝 New Settlement", callback_data: "new_settlement" }],
         [{ text: "📊 Dashboard", callback_data: "dashboard" }],
@@ -1372,47 +1490,142 @@ async function handleOCRApplyPayment(
   );
 }
 
-async function handleOCRStaffSelected(
-  chatId: number,
-  staffId: string,
-  amount: number
-) {
+async function handleOCRStaffSelected(chatId: number, staffId: string, amount: number) {
   const staff = await Staff.findById(staffId).lean();
   if (!staff) return;
 
   await setSession(chatId, {
-    step: "ocr_settle_cylinder",
-    data: { staffId, staffName: staff.name, items: [], actualCash: amount },
+    step: "settle_date",
+    data: { staffId, staffName: staff.name, items: [], actualCashReceived: amount, isOCR: true },
   });
 
-  await handleOCRCylinderSelect(chatId);
+  await sendMessage(chatId, `📅 Enter settlement <b>date</b> (DD/MM/YYYY) or type <b>today</b>:`);
 }
 
-async function handleOCRCylinderSelect(chatId: number) {
-  const session = await getSession(chatId);
-  if (!session) return;
+async function showTransactionsMenu(chatId: number, session: { step: string; data: Record<string, unknown> }) {
+  const transactions = (session.data.transactions as { type: string; category: string; amount: number }[]) || [];
+  const totalCredits = transactions.filter(t => t.type === "credit").reduce((a, t) => a + t.amount, 0);
+  const totalDebits = transactions.filter(t => t.type === "debit").reduce((a, t) => a + t.amount, 0);
 
-  const items = session.data.items as { cylinderSize: string; quantity: number }[];
-  const inventory = await Inventory.find({}).sort({ cylinderSize: 1 }).lean();
-
-  const currentItems = items.length
-    ? `\n\n📦 Added so far:\n${items.map((i) => `  ${i.quantity}× ${i.cylinderSize}`).join("\n")}`
-    : "";
+  let txSummary = "";
+  if (transactions.length > 0) {
+    txSummary = "\n\n📊 <b>Transactions so far:</b>\n" +
+      transactions.map(t => `  ${t.type === "credit" ? "➕" : "➖"} ${t.category}: ${formatINR(t.amount)}`).join("\n") +
+      `\n\nTotal Credits: ${formatINR(totalCredits)} | Total Debits: ${formatINR(totalDebits)}`;
+  }
 
   await sendMessage(
     chatId,
-    `📝 Settlement for <b>${session.data.staffName}</b>\n💵 UPI Amount: <b>${formatINR(session.data.actualCash as number)}</b>\n\nSelect cylinder to add:${currentItems}`,
+    `💰 <b>Add Transactions</b>${txSummary}\n\nAdd credits (payments received) or debits (expenses/discounts):`,
     inlineKeyboard([
-      ...inventory.map((i) => [
-        {
-          text: `${i.cylinderSize} — ${formatINR(i.pricePerUnit)} (${i.fullStock} avail)`,
-          callback_data: `settle_cyl_${i.cylinderSize}`,
-        },
-      ]),
-      [{ text: "✅ Done Adding", callback_data: "settle_done_cylinders" }],
-      [{ text: "❌ Cancel", callback_data: "settle_cancel" }],
+      [
+        { text: "➕ Add Credit", callback_data: "settle_tx_credit" },
+        { text: "➖ Add Debit", callback_data: "settle_tx_debit" },
+      ],
+      [{ text: "✅ Done", callback_data: "settle_tx_done" }],
     ])
   );
+}
+
+// ─── ATTENDANCE HANDLERS ────────────────────────────────────
+
+async function handleAttendanceEdit(chatId: number, messageId: number) {
+  const now = new Date();
+  const istOffset = 5.5 * 60 * 60 * 1000;
+  const istNow = new Date(now.getTime() + istOffset);
+  const istDateStr = istNow.toISOString().split("T")[0];
+  const today = new Date(istDateStr + "T00:00:00.000+05:30");
+  const endOfDay = new Date(istDateStr + "T23:59:59.999+05:30");
+
+  const [staff, attendance] = await Promise.all([
+    Staff.find({ isActive: true }).sort({ name: 1 }).lean(),
+    Attendance.find({ date: { $gte: today, $lte: endOfDay } }).lean(),
+  ]);
+
+  if (staff.length === 0) {
+    await editMessage(chatId, messageId, "📅 <b>Attendance</b>\n\nNo staff members.", mainMenuKeyboard());
+    return;
+  }
+
+  const attendanceMap = new Map<string, string>();
+  for (const a of attendance) {
+    attendanceMap.set(a.staff.toString(), a.status);
+  }
+
+  const present = staff.filter(s => attendanceMap.get(s._id.toString()) === "present").length;
+  const absent = staff.filter(s => attendanceMap.get(s._id.toString()) === "absent").length;
+  const halfDay = staff.filter(s => attendanceMap.get(s._id.toString()) === "half-day").length;
+  const unmarked = staff.length - present - absent - halfDay;
+
+  const lines = staff.map(s => {
+    const status = attendanceMap.get(s._id.toString());
+    const emoji = status === "present" ? "✅" : status === "absent" ? "❌" : status === "half-day" ? "🟡" : "⬜";
+    return `${emoji} ${s.name}`;
+  });
+
+  const msg = [
+    `📅 <b>Attendance</b> — ${formatDateShort(new Date())}`,
+    ``,
+    `✅ ${present} Present | ❌ ${absent} Absent | 🟡 ${halfDay} Half-day | ⬜ ${unmarked} Unmarked`,
+    ``,
+    ...lines,
+  ].join("\n");
+
+  const buttons: { text: string; callback_data: string }[][] = [];
+  for (const s of staff) {
+    const currentStatus = attendanceMap.get(s._id.toString());
+    buttons.push([
+      { text: `${currentStatus === "present" ? "✅" : ""} ${s.name} P`, callback_data: `att_mark_${s._id}_present` },
+      { text: `${currentStatus === "absent" ? "❌" : ""} A`, callback_data: `att_mark_${s._id}_absent` },
+      { text: `${currentStatus === "half-day" ? "🟡" : ""} H`, callback_data: `att_mark_${s._id}_half-day` },
+    ]);
+  }
+  buttons.push([{ text: "✅ Mark All Present", callback_data: "att_all_present" }]);
+  buttons.push([{ text: "🔄 Refresh", callback_data: "attendance" }]);
+  buttons.push([{ text: "🏠 Main Menu", callback_data: "main_menu" }]);
+
+  await editMessage(chatId, messageId, msg, inlineKeyboard(buttons));
+}
+
+async function handleAttendanceMark(chatId: number, messageId: number, staffId: string, status: string) {
+  const now = new Date();
+  const istOffset = 5.5 * 60 * 60 * 1000;
+  const istNow = new Date(now.getTime() + istOffset);
+  const istDateStr = istNow.toISOString().split("T")[0];
+  const today = new Date(istDateStr + "T00:00:00.000+05:30");
+
+  await Attendance.findOneAndUpdate(
+    { staff: staffId, date: today },
+    { status, markedBy: "telegram" },
+    { upsert: true }
+  );
+
+  // Refresh the attendance view
+  await handleAttendanceEdit(chatId, messageId);
+}
+
+async function handleAttendanceAllPresent(chatId: number, messageId: number) {
+  const now = new Date();
+  const istOffset = 5.5 * 60 * 60 * 1000;
+  const istNow = new Date(now.getTime() + istOffset);
+  const istDateStr = istNow.toISOString().split("T")[0];
+  const today = new Date(istDateStr + "T00:00:00.000+05:30");
+
+  const staff = await Staff.find({ isActive: true }).lean();
+
+  const bulkOps = staff.map(s => ({
+    updateOne: {
+      filter: { staff: s._id, date: today },
+      update: { status: "present", markedBy: "telegram" },
+      upsert: true,
+    },
+  }));
+
+  if (bulkOps.length > 0) {
+    await Attendance.bulkWrite(bulkOps);
+  }
+
+  await handleAttendanceEdit(chatId, messageId);
 }
 
 async function handleRecentSettlementsEdit(chatId: number, messageId: number) {
@@ -1440,9 +1653,10 @@ async function handleRecentSettlementsEdit(chatId: number, messageId: number) {
     const cylinders = s.items
       .map((i: { quantity: number; cylinderSize: string }) => `${i.quantity}×${i.cylinderSize}`)
       .join(", ");
+    const pending = (normalizeSettlement(s as unknown as Record<string, unknown>).amountPending as number) || 0;
     return [
       `📅 ${formatDateShort(s.date)} — <b>${staffName}</b>`,
-      `   📦 ${cylinders} | 💰 ${formatINR(s.grossRevenue)}${s.shortage > 0 ? ` | ⚠️ ${formatINR(s.shortage)}` : ""}`,
+      `   📦 ${cylinders} | 💰 ${formatINR(s.grossRevenue)}${pending > 0 ? ` | ⚠️ ${formatINR(pending)}` : ""}`,
     ].join("\n");
   });
 

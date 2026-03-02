@@ -12,8 +12,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-const CYLINDER_SIZES = ["5kg", "10kg", "14kg", "19kg"];
-
 interface Debtor {
   customerId: string;
   type: "cash" | "cylinder";
@@ -26,9 +24,10 @@ interface DebtorEntryProps {
   debtors: Debtor[];
   onChange: (debtors: Debtor[]) => void;
   customers: Array<{ _id: string; name: string; phone?: string }>;
+  cylinderSizes: string[];
 }
 
-export function DebtorEntry({ debtors, onChange, customers }: DebtorEntryProps) {
+export function DebtorEntry({ debtors, onChange, customers, cylinderSizes }: DebtorEntryProps) {
   const addDebtor = () => {
     onChange([...debtors, { customerId: "", type: "cash", amount: 0 }]);
   };
@@ -131,7 +130,7 @@ export function DebtorEntry({ debtors, onChange, customers }: DebtorEntryProps) 
                       <SelectValue placeholder="Size" />
                     </SelectTrigger>
                     <SelectContent>
-                      {CYLINDER_SIZES.map((size) => (
+                      {cylinderSizes.map((size) => (
                         <SelectItem key={size} value={size}>
                           {size}
                         </SelectItem>

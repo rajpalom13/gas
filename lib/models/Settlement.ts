@@ -22,7 +22,7 @@ export interface IDebtor {
 }
 
 export interface ISettlementItem {
-  cylinderSize: "5kg" | "10kg" | "14kg" | "19kg";
+  cylinderSize: string;
   quantity: number;
   pricePerUnit: number;
   total: number;
@@ -98,7 +98,7 @@ const DebtorSchema = new Schema<IDebtor>(
 
 const SettlementItemSchema = new Schema<ISettlementItem>(
   {
-    cylinderSize: { type: String, enum: ["5kg", "10kg", "14kg", "19kg"], required: true },
+    cylinderSize: { type: String, required: true },
     quantity: { type: Number, required: true, min: 0 },
     pricePerUnit: { type: Number, required: true, min: 0 },
     total: { type: Number, required: true },

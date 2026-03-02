@@ -3,13 +3,15 @@
 import { useEffect, useState } from "react";
 import { useSession } from "next-auth/react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Plus, Pencil, Trash2, Users, Search, BookOpen, Loader2 } from "lucide-react";
+import { Plus, Pencil, Trash2, Users, Search, BookOpen, Loader2, UserCog } from "lucide-react";
 import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { PageHeader } from "@/components/ui/page-header";
+import { sectionThemes } from "@/lib/theme";
 import {
   Dialog,
   DialogContent,
@@ -108,7 +110,12 @@ export default function StaffPage() {
   if (loading) {
     return (
       <div className="space-y-6">
-        <h1 className="text-2xl font-bold">Staff Management</h1>
+        <PageHeader
+          icon={<UserCog className="h-5 w-5" />}
+          title="Staff Management"
+          subtitle="Loading staff..."
+          gradient={sectionThemes.staff.gradient}
+        />
         <Skeleton className="h-10 w-full rounded-xl" />
         <div className="space-y-3">
           {[...Array(5)].map((_, i) => (
@@ -121,22 +128,20 @@ export default function StaffPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between flex-wrap gap-4">
-        <div>
-          <h1 className="text-2xl font-bold">Staff Management</h1>
-          <p className="text-zinc-500 text-sm mt-1">
-            {staff.length} {showInactive ? "inactive" : "active"} staff members
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          {!showInactive && (
+      <PageHeader
+        icon={<UserCog className="h-5 w-5" />}
+        title="Staff Management"
+        subtitle={`${staff.length} ${showInactive ? "inactive" : "active"} staff members`}
+        gradient={sectionThemes.staff.gradient}
+        actions={
+          !showInactive ? (
             <Button onClick={() => { setEditingId(null); setForm({ name: "", phone: "", address: "" }); setDialogOpen(true); }}>
               <Plus className="h-4 w-4" />
               Add Staff
             </Button>
-          )}
-        </div>
-      </div>
+          ) : undefined
+        }
+      />
 
       <div className="flex items-center gap-3">
         <div className="relative flex-1">

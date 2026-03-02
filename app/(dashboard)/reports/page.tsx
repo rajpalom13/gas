@@ -19,6 +19,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { PageHeader } from "@/components/ui/page-header";
+import { StatCard } from "@/components/ui/stat-card";
+import { sectionThemes } from "@/lib/theme";
 import {
   Table,
   TableHeader,
@@ -29,6 +32,7 @@ import {
 } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
 import { formatCurrency } from "@/lib/utils";
+import { staggerContainer, fadeUpItem } from "@/lib/animations";
 
 interface ReportSummary {
   totalSettlements: number;
@@ -101,19 +105,6 @@ interface ReportData {
   newConnectionReport?: NewConnectionItem[];
   emptyReconciliation?: EmptyReconciliationItem[];
 }
-
-const containerVariants = {
-  hidden: { opacity: 0 },
-  show: {
-    opacity: 1,
-    transition: { staggerChildren: 0.06 },
-  },
-};
-
-const itemVariants = {
-  hidden: { opacity: 0, y: 12 },
-  show: { opacity: 1, y: 0, transition: { duration: 0.3 } },
-};
 
 function formatDateStr(dateStr: string): string {
   return new Date(dateStr).toLocaleDateString("en-IN", {
@@ -376,12 +367,12 @@ export default function ReportsPage() {
   if (loading) {
     return (
       <div className="space-y-6">
-        <div>
-          <h1 className="text-2xl font-bold">Reports</h1>
-          <p className="text-zinc-500 text-sm mt-1">
-            Settlement reports and analytics
-          </p>
-        </div>
+        <PageHeader
+          icon={<BarChart3 className="h-5 w-5" />}
+          title="Reports"
+          subtitle="Settlement reports and analytics"
+          gradient={sectionThemes.reports.gradient}
+        />
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {[...Array(7)].map((_, i) => (
             <Skeleton key={i} className="h-32 rounded-xl" />
@@ -396,18 +387,18 @@ export default function ReportsPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold">Reports</h1>
-          <p className="text-zinc-500 text-sm mt-1">
-            Settlement reports and analytics
-          </p>
-        </div>
-        <Button onClick={exportCSV} variant="outline" className="gap-2">
-          <Download className="h-4 w-4" />
-          Export CSV
-        </Button>
-      </div>
+      <PageHeader
+        icon={<BarChart3 className="h-5 w-5" />}
+        title="Reports"
+        subtitle="Settlement reports and analytics"
+        gradient={sectionThemes.reports.gradient}
+        actions={
+          <Button onClick={exportCSV} variant="outline" className="gap-2">
+            <Download className="h-4 w-4" />
+            Export CSV
+          </Button>
+        }
+      />
 
       {/* Date Range Picker */}
       <Card>
@@ -485,37 +476,26 @@ export default function ReportsPage() {
 
       {/* Summary Cards */}
       <motion.div
-        variants={containerVariants}
+        variants={staggerContainer}
         initial="hidden"
         animate="show"
         className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"
       >
         {statCards.map((card) => (
-          <motion.div key={card.title} variants={itemVariants}>
-            <Card className="hover:shadow-md transition-shadow">
-              <CardContent className="p-5">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-sm text-zinc-500">{card.title}</p>
-                    <p className="text-2xl font-bold mt-1">{card.value}</p>
-                    {"suffix" in card && card.suffix && (
-                      <p className="text-xs text-zinc-400 mt-0.5">
-                        {card.suffix}
-                      </p>
-                    )}
-                  </div>
-                  <div className={`${card.bg} p-3 rounded-xl`}>
-                    <card.icon className={`h-5 w-5 ${card.color}`} />
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
+          <motion.div key={card.title} variants={fadeUpItem}>
+            <StatCard
+              icon={<card.icon className="h-5 w-5" />}
+              label={card.title}
+              value={"suffix" in card && card.suffix ? `${card.value} ${card.suffix}` : card.value}
+              iconBg={card.bg}
+              iconColor={card.color}
+            />
           </motion.div>
         ))}
       </motion.div>
 
       {/* Staff Performance Table */}
-      <motion.div variants={itemVariants} initial="hidden" animate="show">
+      <motion.div variants={fadeUpItem} initial="hidden" animate="show">
         <Card>
           <CardHeader>
             <CardTitle className="text-base">Staff Performance</CardTitle>
@@ -577,7 +557,7 @@ export default function ReportsPage() {
 
       {/* Transaction Category Breakdown */}
       {data?.transactionBreakdown && data.transactionBreakdown.length > 0 && (
-        <motion.div variants={itemVariants} initial="hidden" animate="show">
+        <motion.div variants={fadeUpItem} initial="hidden" animate="show">
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Transaction Category Breakdown</CardTitle>
@@ -620,7 +600,7 @@ export default function ReportsPage() {
 
       {/* New Connections Report */}
       {data?.newConnectionReport && data.newConnectionReport.length > 0 && (
-        <motion.div variants={itemVariants} initial="hidden" animate="show">
+        <motion.div variants={fadeUpItem} initial="hidden" animate="show">
           <Card>
             <CardHeader>
               <CardTitle className="text-base">New Connections (DBC)</CardTitle>
@@ -650,7 +630,7 @@ export default function ReportsPage() {
 
       {/* Empty Reconciliation Report */}
       {data?.emptyReconciliation && data.emptyReconciliation.length > 0 && (
-        <motion.div variants={itemVariants} initial="hidden" animate="show">
+        <motion.div variants={fadeUpItem} initial="hidden" animate="show">
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Empty Cylinder Reconciliation</CardTitle>
@@ -695,7 +675,7 @@ export default function ReportsPage() {
       )}
 
       {/* Cylinder Distribution */}
-      <motion.div variants={itemVariants} initial="hidden" animate="show">
+      <motion.div variants={fadeUpItem} initial="hidden" animate="show">
         <Card>
           <CardHeader>
             <CardTitle className="text-base">Cylinder Distribution</CardTitle>
@@ -744,7 +724,7 @@ export default function ReportsPage() {
       </motion.div>
 
       {/* Daily Trends */}
-      <motion.div variants={itemVariants} initial="hidden" animate="show">
+      <motion.div variants={fadeUpItem} initial="hidden" animate="show">
         <Card>
           <CardHeader>
             <CardTitle className="text-base">Daily Trends</CardTitle>

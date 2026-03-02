@@ -14,8 +14,11 @@ import {
   Calendar,
   User,
   Banknote,
+  Receipt,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { PageHeader } from "@/components/ui/page-header";
+import { sectionThemes } from "@/lib/theme";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -672,6 +675,7 @@ export default function SettlementDetailPage() {
                   debtors={editDebtors}
                   onChange={setEditDebtors}
                   customers={customerList}
+                  cylinderSizes={inventoryList.map((i: InventoryOption) => i.cylinderSize)}
                 />
               </CardContent>
             </Card>
@@ -708,7 +712,8 @@ export default function SettlementDetailPage() {
           </Card>
 
           {/* Summary */}
-          <Card className="bg-zinc-50 dark:bg-zinc-900 border-2">
+          <Card className="bg-zinc-50 dark:bg-zinc-900 border-2 relative overflow-hidden">
+            <div className={`absolute inset-x-0 top-0 h-1 bg-gradient-to-r ${sectionThemes.settlements.gradient}`} />
             <CardHeader>
               <CardTitle className="text-base flex items-center gap-2">
                 <Calculator className="h-4 w-4" />
@@ -799,34 +804,34 @@ export default function SettlementDetailPage() {
   return (
     <div className="space-y-6 max-w-4xl">
       {/* Header */}
-      <div className="flex items-center justify-between flex-wrap gap-4">
-        <div className="flex items-center gap-4">
-          <Link href="/settlements">
-            <Button variant="ghost" size="icon">
-              <ArrowLeft className="h-4 w-4" />
-            </Button>
-          </Link>
-          <div>
-            <h1 className="text-2xl font-bold">Settlement Details</h1>
-            <p className="text-zinc-500 text-sm mt-1">
-              {formatDate(s.date)} -- {s.staff.name}
-            </p>
-          </div>
-        </div>
-        <div className="flex gap-2">
-          <Button variant="outline" onClick={startEditing}>
-            <Pencil className="h-4 w-4" />
-            Edit
+      <div className="flex items-center gap-4 mb-2">
+        <Link href="/settlements">
+          <Button variant="ghost" size="icon">
+            <ArrowLeft className="h-4 w-4" />
           </Button>
-          <Button
-            variant="destructive"
-            onClick={() => setShowDeleteDialog(true)}
-          >
-            <Trash2 className="h-4 w-4" />
-            Delete
-          </Button>
-        </div>
+        </Link>
       </div>
+      <PageHeader
+        icon={<Receipt className="h-5 w-5" />}
+        title="Settlement Details"
+        subtitle={`${formatDate(s.date)} -- ${s.staff.name}`}
+        gradient={sectionThemes.settlements.gradient}
+        actions={
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={startEditing}>
+              <Pencil className="h-4 w-4" />
+              Edit
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => setShowDeleteDialog(true)}
+            >
+              <Trash2 className="h-4 w-4" />
+              Delete
+            </Button>
+          </div>
+        }
+      />
 
       <motion.div
         initial={{ opacity: 0, y: 12 }}
@@ -834,7 +839,8 @@ export default function SettlementDetailPage() {
         className="space-y-6"
       >
         {/* Basic Info */}
-        <Card>
+        <Card className="relative overflow-hidden">
+          <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-blue-500 to-blue-400" />
           <CardHeader>
             <CardTitle className="text-base">Basic Information</CardTitle>
           </CardHeader>
@@ -874,7 +880,8 @@ export default function SettlementDetailPage() {
         </Card>
 
         {/* Cylinders */}
-        <Card>
+        <Card className="relative overflow-hidden">
+          <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-indigo-500 to-indigo-400" />
           <CardHeader>
             <div className="flex items-center justify-between">
               <CardTitle className="text-base">Cylinders Delivered</CardTitle>
