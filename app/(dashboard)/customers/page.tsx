@@ -3,11 +3,12 @@
 import { useEffect, useState } from "react";
 import { useSession } from "next-auth/react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Plus, Pencil, Trash2, Contact, Search, Loader2 } from "lucide-react";
+import { Plus, Pencil, Trash2, Contact, Search, Loader2, Banknote } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
   DialogContent,
@@ -15,6 +16,13 @@ import {
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Table,
   TableHeader,
@@ -24,6 +32,7 @@ import {
   TableCell,
 } from "@/components/ui/table";
 import { toast } from "@/lib/use-toast";
+import { formatCurrency } from "@/lib/utils";
 import { Skeleton } from "@/components/ui/skeleton";
 
 interface Customer {
@@ -32,6 +41,8 @@ interface Customer {
   phone: string;
   address: string;
   notes: string;
+  cashDebt: number;
+  cylinderDebts: Array<{ cylinderSize: string; quantity: number }>;
 }
 
 export default function CustomersPage() {
@@ -45,6 +56,15 @@ export default function CustomersPage() {
   const [form, setForm] = useState({ name: "", phone: "", address: "", notes: "" });
   const [saving, setSaving] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+
+  // Pay Debt dialog state
+  const [payDebtOpen, setPayDebtOpen] = useState(false);
+  const [payDebtCustomer, setPayDebtCustomer] = useState<Customer | null>(null);
+  const [debtType, setDebtType] = useState<"cash" | "cylinder">("cash");
+  const [debtAmount, setDebtAmount] = useState("");
+  const [debtCylinderSize, setDebtCylinderSize] = useState("");
+  const [debtCylinderQty, setDebtCylinderQty] = useState("");
+  const [payingDebt, setPayingDebt] = useState(false);
 
   const fetchCustomers = () => {
     fetch("/api/customers")
@@ -93,6 +113,53 @@ export default function CustomersPage() {
     setDeleteConfirm(null);
     toast({ title: "Customer deleted", description: "Customer has been removed", variant: "destructive" });
     fetchCustomers();
+  };
+
+  const openPayDebt = (customer: Customer) => {
+    setPayDebtCustomer(customer);
+    setDebtType(customer.cashDebt > 0 ? "cash" : "cylinder");
+    setDebtAmount("");
+    setDebtCylinderSize(customer.cylinderDebts.length > 0 ? customer.cylinderDebts[0].cylinderSize : "");
+    setDebtCylinderQty("");
+    setPayDebtOpen(true);
+  };
+
+  const handlePayDebt = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!payDebtCustomer) return;
+    setPayingDebt(true);
+
+    const body: Record<string, unknown> = { type: debtType };
+    if (debtType === "cash") {
+      body.amount = parseFloat(debtAmount);
+    } else {
+      body.cylinderSize = debtCylinderSize;
+      body.quantity = parseInt(debtCylinderQty);
+    }
+
+    const res = await fetch(`/api/customers/${payDebtCustomer._id}/debt-payment`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    if (res.ok) {
+      toast({ title: "Debt payment recorded", description: "Customer debt has been updated", variant: "success" });
+      setPayDebtOpen(false);
+      setPayDebtCustomer(null);
+      fetchCustomers();
+    } else {
+      const data = await res.json();
+      toast({ title: "Error", description: data.error || "Failed to record payment", variant: "destructive" });
+    }
+    setPayingDebt(false);
+  };
+
+  const hasDebt = (c: Customer) => (c.cashDebt || 0) > 0 || (c.cylinderDebts && c.cylinderDebts.length > 0);
+
+  const formatCylinderDebts = (debts: Array<{ cylinderSize: string; quantity: number }>) => {
+    if (!debts || debts.length === 0) return null;
+    return debts.filter(d => d.quantity > 0).map(d => `${d.quantity}x ${d.cylinderSize}`).join(", ");
   };
 
   const filtered = customers.filter((c) =>
@@ -165,7 +232,24 @@ export default function CustomersPage() {
               {customer.notes && (
                 <p className="text-xs text-zinc-400 truncate">{customer.notes}</p>
               )}
+              {/* Debt info */}
+              {hasDebt(customer) && (
+                <div className="flex flex-wrap gap-2">
+                  {(customer.cashDebt || 0) > 0 && (
+                    <Badge variant="destructive">{formatCurrency(customer.cashDebt)} cash</Badge>
+                  )}
+                  {formatCylinderDebts(customer.cylinderDebts) && (
+                    <Badge variant="warning">{formatCylinderDebts(customer.cylinderDebts)}</Badge>
+                  )}
+                </div>
+              )}
               <div className="flex items-center justify-end gap-1 pt-2 border-t border-zinc-100 dark:border-zinc-800">
+                {hasDebt(customer) && (
+                  <Button variant="ghost" size="sm" className="text-emerald-600 hover:text-emerald-700" onClick={() => openPayDebt(customer)}>
+                    <Banknote className="h-4 w-4" />
+                    Pay Debt
+                  </Button>
+                )}
                 <Button variant="ghost" size="sm" onClick={() => handleEdit(customer)}>
                   <Pencil className="h-4 w-4" />
                   Edit
@@ -201,7 +285,8 @@ export default function CustomersPage() {
                 <TableHead>Name</TableHead>
                 <TableHead>Phone</TableHead>
                 <TableHead>Address</TableHead>
-                <TableHead>Notes</TableHead>
+                <TableHead>Cash Debt</TableHead>
+                <TableHead>Cylinder Debt</TableHead>
                 <TableHead className="text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
@@ -226,12 +311,32 @@ export default function CustomersPage() {
                     <TableCell>{customer.phone || "\u2014"}</TableCell>
                     <TableCell>{customer.address || "\u2014"}</TableCell>
                     <TableCell>
-                      <span className="truncate block max-w-[200px]">
-                        {customer.notes || "\u2014"}
-                      </span>
+                      {(customer.cashDebt || 0) > 0 ? (
+                        <span className="text-red-600 font-medium">{formatCurrency(customer.cashDebt)}</span>
+                      ) : (
+                        "\u2014"
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      {formatCylinderDebts(customer.cylinderDebts) ? (
+                        <div className="flex gap-1 flex-wrap">
+                          {customer.cylinderDebts.filter(d => d.quantity > 0).map((d, i) => (
+                            <Badge key={i} variant="warning" className="text-[10px]">
+                              {d.quantity}x {d.cylinderSize}
+                            </Badge>
+                          ))}
+                        </div>
+                      ) : (
+                        "\u2014"
+                      )}
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-1">
+                        {hasDebt(customer) && (
+                          <Button variant="ghost" size="icon" className="text-emerald-600 hover:text-emerald-700" onClick={() => openPayDebt(customer)}>
+                            <Banknote className="h-4 w-4" />
+                          </Button>
+                        )}
                         <Button variant="ghost" size="icon" onClick={() => handleEdit(customer)}>
                           <Pencil className="h-4 w-4" />
                         </Button>
@@ -252,7 +357,7 @@ export default function CustomersPage() {
               </AnimatePresence>
               {filtered.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={5} className="text-center py-12 text-zinc-500">
+                  <TableCell colSpan={6} className="text-center py-12 text-zinc-500">
                     <Contact className="h-8 w-8 mx-auto mb-2 opacity-50" />
                     {search ? "No customers found matching search" : "No customers yet"}
                   </TableCell>
@@ -334,6 +439,99 @@ export default function CustomersPage() {
               Delete
             </Button>
           </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Pay Debt Dialog */}
+      <Dialog open={payDebtOpen} onOpenChange={setPayDebtOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Pay Debt</DialogTitle>
+            <DialogDescription>
+              Record a debt payment for {payDebtCustomer?.name}.
+              {payDebtCustomer && (payDebtCustomer.cashDebt || 0) > 0 && (
+                <> Cash debt: {formatCurrency(payDebtCustomer.cashDebt)}.</>
+              )}
+              {payDebtCustomer && formatCylinderDebts(payDebtCustomer.cylinderDebts) && (
+                <> Cylinder debt: {formatCylinderDebts(payDebtCustomer.cylinderDebts)}.</>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <form onSubmit={handlePayDebt} className="space-y-4">
+            <div className="space-y-2">
+              <Label>Payment Type</Label>
+              <Select value={debtType} onValueChange={(v) => setDebtType(v as "cash" | "cylinder")}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {payDebtCustomer && (payDebtCustomer.cashDebt || 0) > 0 && (
+                    <SelectItem value="cash">Cash</SelectItem>
+                  )}
+                  {payDebtCustomer && payDebtCustomer.cylinderDebts && payDebtCustomer.cylinderDebts.length > 0 && (
+                    <SelectItem value="cylinder">Cylinder</SelectItem>
+                  )}
+                </SelectContent>
+              </Select>
+            </div>
+
+            {debtType === "cash" && (
+              <div className="space-y-2">
+                <Label>Amount *</Label>
+                <Input
+                  type="number"
+                  min={1}
+                  max={payDebtCustomer?.cashDebt || 0}
+                  value={debtAmount}
+                  onChange={(e) => setDebtAmount(e.target.value)}
+                  required
+                  placeholder={`Max: ${formatCurrency(payDebtCustomer?.cashDebt || 0)}`}
+                />
+              </div>
+            )}
+
+            {debtType === "cylinder" && (
+              <>
+                <div className="space-y-2">
+                  <Label>Cylinder Size *</Label>
+                  <Select value={debtCylinderSize} onValueChange={setDebtCylinderSize}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select size" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {payDebtCustomer?.cylinderDebts?.filter(d => d.quantity > 0).map((d) => (
+                        <SelectItem key={d.cylinderSize} value={d.cylinderSize}>
+                          {d.cylinderSize} (owed: {d.quantity})
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label>Quantity *</Label>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={payDebtCustomer?.cylinderDebts?.find(d => d.cylinderSize === debtCylinderSize)?.quantity || 1}
+                    value={debtCylinderQty}
+                    onChange={(e) => setDebtCylinderQty(e.target.value)}
+                    required
+                    placeholder="Number of cylinders returned"
+                  />
+                </div>
+              </>
+            )}
+
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="outline" onClick={() => setPayDebtOpen(false)}>
+                Cancel
+              </Button>
+              <Button type="submit" disabled={payingDebt}>
+                {payingDebt ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                Record Payment
+              </Button>
+            </div>
+          </form>
         </DialogContent>
       </Dialog>
     </div>

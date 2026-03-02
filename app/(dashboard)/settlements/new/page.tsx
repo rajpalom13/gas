@@ -9,6 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Badge } from "@/components/ui/badge";
 import {
   Select,
   SelectContent,
@@ -19,6 +20,10 @@ import {
 import { formatCurrency } from "@/lib/utils";
 import { toast } from "@/lib/use-toast";
 import { DenominationEntry } from "@/components/denomination-entry";
+import { TransactionEntry } from "@/components/transaction-entry";
+import { EmptyCylinderEntry } from "@/components/empty-cylinder-entry";
+import { DebtorEntry } from "@/components/debtor-entry";
+import { computeSettlement } from "@/lib/settlement-utils";
 
 interface CustomerOption {
   _id: string;
@@ -40,6 +45,23 @@ interface InventoryOption {
 interface SettlementItem {
   cylinderSize: string;
   quantity: number;
+  isNewConnection: boolean;
+  priceOverride?: number;
+}
+
+interface Transaction {
+  category: string;
+  type: "credit" | "debit";
+  amount: number;
+  note?: string;
+}
+
+interface Debtor {
+  customerId: string;
+  type: "cash" | "cylinder";
+  amount?: number;
+  cylinderSize?: string;
+  quantity?: number;
 }
 
 export default function NewSettlementPage() {
@@ -50,13 +72,19 @@ export default function NewSettlementPage() {
   const [staffId, setStaffId] = useState("");
   const [customerId, setCustomerId] = useState("");
   const [date, setDate] = useState(new Date().toISOString().split("T")[0]);
-  const [items, setItems] = useState<SettlementItem[]>([{ cylinderSize: "", quantity: 0 }]);
-  const [addPayment, setAddPayment] = useState(0);
-  const [reducePayment, setReducePayment] = useState(0);
-  const [expenses, setExpenses] = useState(0);
-  const [actualCash, setActualCash] = useState(0);
+  const [items, setItems] = useState<SettlementItem[]>([
+    { cylinderSize: "", quantity: 0, isNewConnection: false },
+  ]);
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [actualCashReceived, setActualCashReceived] = useState(0);
+  const [emptyCylindersReturned, setEmptyCylindersReturned] = useState<
+    Array<{ cylinderSize: string; quantity: number }>
+  >([]);
+  const [debtors, setDebtors] = useState<Debtor[]>([]);
   const [notes, setNotes] = useState("");
-  const [denominations, setDenominations] = useState<{ note: number; count: number; total: number }[]>([]);
+  const [denominations, setDenominations] = useState<
+    { note: number; count: number; total: number }[]
+  >([]);
   const [saving, setSaving] = useState(false);
   const [attempted, setAttempted] = useState(false);
 
@@ -72,26 +100,40 @@ export default function NewSettlementPage() {
     });
   }, []);
 
-  const getPrice = (size: string) => {
-    return inventoryList.find((i) => i.cylinderSize === size)?.pricePerUnit || 0;
+  const getPrice = (item: SettlementItem) => {
+    if (item.priceOverride && item.priceOverride > 0) return item.priceOverride;
+    return inventoryList.find((i) => i.cylinderSize === item.cylinderSize)?.pricePerUnit || 0;
   };
 
-  const grossRevenue = items.reduce((acc, item) => {
-    return acc + item.quantity * getPrice(item.cylinderSize);
-  }, 0);
+  // Build items with computed totals for the settlement calculator
+  const computedItems = items
+    .filter((i) => i.cylinderSize && i.quantity > 0)
+    .map((item) => {
+      const price = getPrice(item);
+      return {
+        cylinderSize: item.cylinderSize,
+        quantity: item.quantity,
+        pricePerUnit: price,
+        total: item.quantity * price,
+        isNewConnection: item.isNewConnection,
+      };
+    });
 
-  const expectedCash = grossRevenue + addPayment - reducePayment - expenses;
-  const shortage = Math.max(0, expectedCash - actualCash);
+  const settlement = computeSettlement(computedItems, transactions, actualCashReceived);
 
   const addItem = () => {
-    setItems([...items, { cylinderSize: "", quantity: 0 }]);
+    setItems([...items, { cylinderSize: "", quantity: 0, isNewConnection: false }]);
   };
 
   const removeItem = (index: number) => {
     setItems(items.filter((_, i) => i !== index));
   };
 
-  const updateItem = (index: number, field: keyof SettlementItem, value: string | number) => {
+  const updateItem = (
+    index: number,
+    field: keyof SettlementItem,
+    value: string | number | boolean
+  ) => {
     const newItems = [...items];
     newItems[index] = { ...newItems[index], [field]: value };
     setItems(newItems);
@@ -124,11 +166,26 @@ export default function NewSettlementPage() {
       body: JSON.stringify({
         staffId,
         date,
-        items: items.filter((i) => i.cylinderSize && i.quantity > 0),
-        addPayment,
-        reducePayment,
-        expenses,
-        actualCash,
+        items: computedItems.map((item) => ({
+          cylinderSize: item.cylinderSize,
+          quantity: item.quantity,
+          isNewConnection: item.isNewConnection,
+          priceOverride: items.find(
+            (i) => i.cylinderSize === item.cylinderSize
+          )?.priceOverride,
+        })),
+        transactions: transactions.filter((t) => t.category && t.amount > 0),
+        actualCash: actualCashReceived,
+        emptyCylindersReturned: emptyCylindersReturned.filter((e) => e.quantity > 0),
+        debtors: debtors
+          .filter((d) => d.customerId)
+          .map((d) => ({
+            customerId: d.customerId,
+            type: d.type,
+            amount: d.amount,
+            cylinderSize: d.cylinderSize,
+            quantity: d.quantity,
+          })),
         notes,
         denominations: denominations.filter((d) => d.count > 0),
         denominationTotal: denominations.reduce((sum, d) => sum + d.total, 0),
@@ -137,7 +194,11 @@ export default function NewSettlementPage() {
     });
 
     if (res.ok) {
-      toast({ title: "Settlement created", description: "New settlement has been recorded", variant: "success" });
+      toast({
+        title: "Settlement created",
+        description: "New settlement has been recorded",
+        variant: "success",
+      });
       router.push("/settlements");
     } else {
       const data = await res.json().catch(() => null);
@@ -196,7 +257,12 @@ export default function NewSettlementPage() {
               </div>
               <div className="space-y-2">
                 <Label>Date *</Label>
-                <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
+                <Input
+                  type="date"
+                  value={date}
+                  onChange={(e) => setDate(e.target.value)}
+                  required
+                />
               </div>
               <div className="space-y-2 sm:col-span-2">
                 <Label>Customer (Optional)</Label>
@@ -208,7 +274,8 @@ export default function NewSettlementPage() {
                     <SelectItem value="none">No customer</SelectItem>
                     {customerList.map((c) => (
                       <SelectItem key={c._id} value={c._id}>
-                        {c.name}{c.phone ? ` — ${c.phone}` : ""}
+                        {c.name}
+                        {c.phone ? ` — ${c.phone}` : ""}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -232,12 +299,15 @@ export default function NewSettlementPage() {
               {items.map((item, idx) => {
                 const stockWarning = getStockWarning(item);
                 const availableSizes = inventoryList.filter(
-                  (inv) => inv.cylinderSize === item.cylinderSize || !selectedSizes.includes(inv.cylinderSize)
+                  (inv) =>
+                    inv.cylinderSize === item.cylinderSize ||
+                    !selectedSizes.includes(inv.cylinderSize)
                 );
+                const price = getPrice(item);
                 return (
                   <div key={idx} className="space-y-1">
-                    <div className="flex items-end gap-3">
-                      <div className="flex-1 space-y-1">
+                    <div className="flex items-end gap-3 flex-wrap">
+                      <div className="flex-1 min-w-[140px] space-y-1">
                         <Label className="text-xs">Size</Label>
                         <Select
                           value={item.cylinderSize}
@@ -249,28 +319,71 @@ export default function NewSettlementPage() {
                           <SelectContent>
                             {availableSizes.map((inv) => (
                               <SelectItem key={inv.cylinderSize} value={inv.cylinderSize}>
-                                {inv.cylinderSize} — {formatCurrency(inv.pricePerUnit)} (Stock: {inv.fullStock})
+                                {inv.cylinderSize} — {formatCurrency(inv.pricePerUnit)} (Stock:{" "}
+                                {inv.fullStock})
                               </SelectItem>
                             ))}
                           </SelectContent>
                         </Select>
                       </div>
-                      <div className="w-24 space-y-1">
+                      <div className="w-20 space-y-1">
                         <Label className="text-xs">Qty</Label>
                         <Input
                           type="number"
                           min={0}
                           value={item.quantity || ""}
-                          onChange={(e) => updateItem(idx, "quantity", parseInt(e.target.value) || 0)}
+                          onChange={(e) =>
+                            updateItem(idx, "quantity", parseInt(e.target.value) || 0)
+                          }
                         />
                       </div>
-                      <div className="w-28 text-right">
+                      <div className="w-28 space-y-1">
+                        <Label className="text-xs">Price Override</Label>
+                        <Input
+                          type="number"
+                          min={0}
+                          value={item.priceOverride || ""}
+                          onChange={(e) =>
+                            updateItem(
+                              idx,
+                              "priceOverride",
+                              parseFloat(e.target.value) || 0
+                            )
+                          }
+                          placeholder="Default"
+                        />
+                      </div>
+                      {/* DBC toggle */}
+                      <div className="space-y-1">
+                        <Label className="text-xs">DBC</Label>
+                        <Button
+                          type="button"
+                          variant={item.isNewConnection ? "default" : "outline"}
+                          size="sm"
+                          className={`w-16 ${
+                            item.isNewConnection
+                              ? "bg-blue-600 hover:bg-blue-700 text-white"
+                              : ""
+                          }`}
+                          onClick={() =>
+                            updateItem(idx, "isNewConnection", !item.isNewConnection)
+                          }
+                        >
+                          {item.isNewConnection ? "Yes" : "No"}
+                        </Button>
+                      </div>
+                      <div className="w-24 text-right">
                         <p className="text-sm font-medium">
-                          {formatCurrency(item.quantity * getPrice(item.cylinderSize))}
+                          {formatCurrency(item.quantity * price)}
                         </p>
                       </div>
                       {items.length > 1 && (
-                        <Button type="button" variant="ghost" size="icon" onClick={() => removeItem(idx)}>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => removeItem(idx)}
+                        >
                           <Trash2 className="h-4 w-4 text-red-500" />
                         </Button>
                       )}
@@ -278,67 +391,96 @@ export default function NewSettlementPage() {
                     {stockWarning && (
                       <p className="text-xs text-amber-600 pl-1">{stockWarning}</p>
                     )}
+                    {item.isNewConnection && (
+                      <Badge variant="default" className="text-[10px] bg-blue-600">
+                        New Connection (DBC) - No empty return expected
+                      </Badge>
+                    )}
                   </div>
                 );
               })}
               <div className="text-right pt-2 border-t border-zinc-100 dark:border-zinc-800">
                 <p className="text-sm text-zinc-500">Gross Revenue</p>
-                <p className="text-xl font-bold">{formatCurrency(grossRevenue)}</p>
+                <p className="text-xl font-bold">
+                  {formatCurrency(settlement.grossRevenue)}
+                </p>
               </div>
               {attempted && !hasValidItems && (
-                <p className="text-xs text-red-500">Add at least one cylinder with quantity greater than 0</p>
+                <p className="text-xs text-red-500">
+                  Add at least one cylinder with quantity greater than 0
+                </p>
               )}
             </CardContent>
           </Card>
 
-          {/* Payments & Cash */}
+          {/* Transactions */}
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">Payments & Cash</CardTitle>
+              <CardTitle className="text-base">Transactions</CardTitle>
             </CardHeader>
-            <CardContent className="grid gap-4 sm:grid-cols-2">
-              <div className="space-y-2">
-                <Label>Add Payment (Extra collected)</Label>
-                <Input
-                  type="number"
-                  min={0}
-                  value={addPayment || ""}
-                  onChange={(e) => setAddPayment(parseFloat(e.target.value) || 0)}
-                  placeholder="0"
-                />
-              </div>
-              <div className="space-y-2">
-                <Label>Reduce Payment (Discounts/Returns)</Label>
-                <Input
-                  type="number"
-                  min={0}
-                  value={reducePayment || ""}
-                  onChange={(e) => setReducePayment(parseFloat(e.target.value) || 0)}
-                  placeholder="0"
-                />
-              </div>
-              <div className="space-y-2">
-                <Label>Expenses</Label>
-                <Input
-                  type="number"
-                  min={0}
-                  value={expenses || ""}
-                  onChange={(e) => setExpenses(parseFloat(e.target.value) || 0)}
-                  placeholder="0"
-                />
-              </div>
-              <div className="space-y-2">
-                <Label>Actual Cash Received *</Label>
-                <Input
-                  type="number"
-                  min={0}
-                  value={actualCash || ""}
-                  onChange={(e) => setActualCash(parseFloat(e.target.value) || 0)}
-                  placeholder="0"
-                />
+            <CardContent className="space-y-4">
+              <TransactionEntry transactions={transactions} onChange={setTransactions} />
+              <div className="pt-4 border-t border-zinc-200 dark:border-zinc-800">
+                <div className="space-y-2">
+                  <Label>Actual Cash Received *</Label>
+                  <Input
+                    type="number"
+                    min={0}
+                    value={actualCashReceived || ""}
+                    onChange={(e) =>
+                      setActualCashReceived(parseFloat(e.target.value) || 0)
+                    }
+                    placeholder="0"
+                  />
+                </div>
               </div>
             </CardContent>
           </Card>
+
+          {/* Empty Cylinders Returned */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Empty Cylinders Returned</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <EmptyCylinderEntry
+                items={items.filter((i) => i.cylinderSize && i.quantity > 0)}
+                emptyCylindersReturned={emptyCylindersReturned}
+                onChange={setEmptyCylindersReturned}
+              />
+            </CardContent>
+          </Card>
+
+          {/* Debtor Assignment */}
+          {(settlement.amountPending > 0 ||
+            emptyCylindersReturned.some((e) => {
+              const item = computedItems.find((i) => i.cylinderSize === e.cylinderSize);
+              if (!item) return false;
+              const expected =
+                item.quantity - (item.isNewConnection ? item.quantity : 0);
+              return e.quantity !== expected;
+            })) && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Debtor Assignment</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {settlement.amountPending > 0 && (
+                  <div className="rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 p-3 mb-4">
+                    <p className="text-sm text-amber-700 dark:text-amber-400">
+                      Amount pending: {formatCurrency(settlement.amountPending)}. Assign
+                      debtors below.
+                    </p>
+                  </div>
+                )}
+                <DebtorEntry
+                  debtors={debtors}
+                  onChange={setDebtors}
+                  customers={customerList}
+                />
+              </CardContent>
+            </Card>
+          )}
 
           {/* Denomination Entry */}
           <Card>
@@ -349,7 +491,7 @@ export default function NewSettlementPage() {
               <DenominationEntry
                 denominations={denominations}
                 onChange={setDenominations}
-                actualCash={actualCash}
+                actualCash={actualCashReceived}
               />
             </CardContent>
           </Card>
@@ -377,23 +519,47 @@ export default function NewSettlementPage() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                 <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
                   <p className="text-xs text-zinc-500">Gross Revenue</p>
-                  <p className="text-lg font-bold text-emerald-600">{formatCurrency(grossRevenue)}</p>
+                  <p className="text-lg font-bold text-emerald-600">
+                    {formatCurrency(settlement.grossRevenue)}
+                  </p>
                 </div>
                 <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
-                  <p className="text-xs text-zinc-500">Expected Cash</p>
-                  <p className="text-lg font-bold">{formatCurrency(expectedCash)}</p>
+                  <p className="text-xs text-zinc-500">+ Credits</p>
+                  <p className="text-lg font-bold text-blue-600">
+                    {formatCurrency(settlement.totalCredits)}
+                  </p>
+                </div>
+                <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
+                  <p className="text-xs text-zinc-500">- Debits</p>
+                  <p className="text-lg font-bold text-orange-600">
+                    {formatCurrency(settlement.totalDebits)}
+                  </p>
+                </div>
+                <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
+                  <p className="text-xs text-zinc-500">Net Revenue</p>
+                  <p className="text-lg font-bold">
+                    {formatCurrency(settlement.netRevenue)}
+                  </p>
                 </div>
                 <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
                   <p className="text-xs text-zinc-500">Actual Cash</p>
-                  <p className="text-lg font-bold text-blue-600">{formatCurrency(actualCash)}</p>
+                  <p className="text-lg font-bold text-blue-600">
+                    {formatCurrency(actualCashReceived)}
+                  </p>
                 </div>
                 <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
-                  <p className="text-xs text-zinc-500">Shortage</p>
-                  <p className={`text-lg font-bold ${shortage > 0 ? "text-red-600" : "text-emerald-600"}`}>
-                    {formatCurrency(shortage)}
+                  <p className="text-xs text-zinc-500">Amount Pending</p>
+                  <p
+                    className={`text-lg font-bold ${
+                      settlement.amountPending > 0
+                        ? "text-red-600"
+                        : "text-emerald-600"
+                    }`}
+                  >
+                    {formatCurrency(settlement.amountPending)}
                   </p>
                 </div>
               </div>
@@ -403,11 +569,15 @@ export default function NewSettlementPage() {
           <div className="flex items-center justify-end gap-3">
             {attempted && !canSubmit && (
               <p className="text-sm text-red-500 mr-auto">
-                {!staffId ? "Select a staff member" : "Add cylinders with quantity > 0"}
+                {!staffId
+                  ? "Select a staff member"
+                  : "Add cylinders with quantity > 0"}
               </p>
             )}
             <Link href="/settlements">
-              <Button type="button" variant="outline">Cancel</Button>
+              <Button type="button" variant="outline">
+                Cancel
+              </Button>
             </Link>
             <Button type="submit" size="lg" disabled={saving}>
               {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}

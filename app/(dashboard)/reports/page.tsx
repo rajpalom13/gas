@@ -11,6 +11,8 @@ import {
   AlertTriangle,
   Package,
   FileText,
+  PackagePlus,
+  IndianRupee,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -31,10 +33,15 @@ import { formatCurrency } from "@/lib/utils";
 interface ReportSummary {
   totalSettlements: number;
   totalRevenue: number;
-  totalExpenses: number;
-  totalShortage: number;
+  totalCredits: number;
+  totalDebits: number;
+  totalAmountPending: number;
+  totalNewConnections: number;
   totalActualCash: number;
   totalDeliveries: number;
+  // Legacy fallbacks
+  totalExpenses?: number;
+  totalShortage?: number;
 }
 
 interface StaffBreakdownItem {
@@ -42,9 +49,13 @@ interface StaffBreakdownItem {
   staffName: string;
   settlementCount: number;
   totalRevenue: number;
-  totalExpenses: number;
-  totalShortage: number;
+  totalCredits: number;
+  totalDebits: number;
+  totalAmountPending: number;
   totalDeliveries: number;
+  // Legacy fallbacks
+  totalExpenses?: number;
+  totalShortage?: number;
 }
 
 interface CylinderBreakdownItem {
@@ -60,11 +71,35 @@ interface DailyTrendItem {
   settlements: number;
 }
 
+interface TransactionBreakdownItem {
+  category: string;
+  type: string;
+  totalAmount: number;
+  count: number;
+}
+
+interface NewConnectionItem {
+  cylinderSize: string;
+  count: number;
+}
+
+interface EmptyReconciliationItem {
+  cylinderSize: string;
+  totalIssued: number;
+  totalNewConnections: number;
+  totalExpected: number;
+  totalReturned: number;
+  totalMismatch: number;
+}
+
 interface ReportData {
   summary: ReportSummary;
   staffBreakdown: StaffBreakdownItem[];
   cylinderBreakdown: CylinderBreakdownItem[];
   dailyTrends: DailyTrendItem[];
+  transactionBreakdown?: TransactionBreakdownItem[];
+  newConnectionReport?: NewConnectionItem[];
+  emptyReconciliation?: EmptyReconciliationItem[];
 }
 
 const containerVariants = {
@@ -160,31 +195,32 @@ export default function ReportsPage() {
       "Staff",
       "Cylinder Sizes",
       "Revenue",
-      "Expenses",
+      "Credits",
+      "Debits",
       "Actual Cash",
-      "Shortage",
+      "Amount Pending",
     ];
 
-    // Build rows from staff breakdown and daily trends
     const rows: string[][] = [];
 
     // Add staff summary rows
-    rows.push(["--- Staff Summary ---", "", "", "", "", "", ""]);
+    rows.push(["--- Staff Summary ---", "", "", "", "", "", "", ""]);
     data.staffBreakdown.forEach((staff) => {
       rows.push([
         "",
         staff.staffName,
         `${staff.totalDeliveries} cylinders`,
         staff.totalRevenue.toString(),
-        staff.totalExpenses.toString(),
+        (staff.totalCredits ?? 0).toString(),
+        (staff.totalDebits ?? staff.totalExpenses ?? 0).toString(),
         "",
-        staff.totalShortage.toString(),
+        (staff.totalAmountPending ?? staff.totalShortage ?? 0).toString(),
       ]);
     });
 
     // Add daily trends
-    rows.push(["", "", "", "", "", "", ""]);
-    rows.push(["--- Daily Trends ---", "", "", "", "", "", ""]);
+    rows.push(["", "", "", "", "", "", "", ""]);
+    rows.push(["--- Daily Trends ---", "", "", "", "", "", "", ""]);
     data.dailyTrends.forEach((day) => {
       rows.push([
         day.date,
@@ -194,12 +230,13 @@ export default function ReportsPage() {
         "",
         "",
         "",
+        "",
       ]);
     });
 
     // Add cylinder breakdown
-    rows.push(["", "", "", "", "", "", ""]);
-    rows.push(["--- Cylinder Breakdown ---", "", "", "", "", "", ""]);
+    rows.push(["", "", "", "", "", "", "", ""]);
+    rows.push(["--- Cylinder Breakdown ---", "", "", "", "", "", "", ""]);
     data.cylinderBreakdown.forEach((cyl) => {
       rows.push([
         "",
@@ -209,19 +246,58 @@ export default function ReportsPage() {
         "",
         "",
         "",
+        "",
       ]);
     });
 
+    // Add transaction breakdown
+    if (data.transactionBreakdown && data.transactionBreakdown.length > 0) {
+      rows.push(["", "", "", "", "", "", "", ""]);
+      rows.push(["--- Transaction Breakdown ---", "", "", "", "", "", "", ""]);
+      rows.push(["Category", "Type", "", "Total Amount", "Count", "", "", ""]);
+      data.transactionBreakdown.forEach((t) => {
+        rows.push([
+          t.category,
+          t.type,
+          "",
+          t.totalAmount.toString(),
+          t.count.toString(),
+          "",
+          "",
+          "",
+        ]);
+      });
+    }
+
+    // Add new connections
+    if (data.newConnectionReport && data.newConnectionReport.length > 0) {
+      rows.push(["", "", "", "", "", "", "", ""]);
+      rows.push(["--- New Connections (DBC) ---", "", "", "", "", "", "", ""]);
+      data.newConnectionReport.forEach((nc) => {
+        rows.push([
+          "",
+          "",
+          `${nc.cylinderSize} x ${nc.count}`,
+          "",
+          "",
+          "",
+          "",
+          "",
+        ]);
+      });
+    }
+
     // Add summary row
-    rows.push(["", "", "", "", "", "", ""]);
+    rows.push(["", "", "", "", "", "", "", ""]);
     rows.push([
       "TOTAL",
       "",
       `${data.summary.totalDeliveries} deliveries`,
       data.summary.totalRevenue.toString(),
-      data.summary.totalExpenses.toString(),
+      (data.summary.totalCredits ?? 0).toString(),
+      (data.summary.totalDebits ?? data.summary.totalExpenses ?? 0).toString(),
       data.summary.totalActualCash.toString(),
-      data.summary.totalShortage.toString(),
+      (data.summary.totalAmountPending ?? data.summary.totalShortage ?? 0).toString(),
     ]);
 
     const csvContent = [
@@ -251,18 +327,33 @@ export default function ReportsPage() {
       bg: "bg-emerald-50 dark:bg-emerald-900/20",
     },
     {
-      title: "Total Expenses",
-      value: formatCurrency(summary?.totalExpenses || 0),
+      title: "Total Credits",
+      value: formatCurrency(summary?.totalCredits || 0),
+      icon: IndianRupee,
+      color: "text-sky-600",
+      bg: "bg-sky-50 dark:bg-sky-900/20",
+    },
+    {
+      title: "Total Debits",
+      value: formatCurrency(summary?.totalDebits ?? summary?.totalExpenses ?? 0),
       icon: TrendingDown,
       color: "text-amber-600",
       bg: "bg-amber-50 dark:bg-amber-900/20",
     },
     {
-      title: "Total Shortage",
-      value: formatCurrency(summary?.totalShortage || 0),
+      title: "Amount Pending",
+      value: formatCurrency(summary?.totalAmountPending ?? summary?.totalShortage ?? 0),
       icon: AlertTriangle,
       color: "text-red-600",
       bg: "bg-red-50 dark:bg-red-900/20",
+    },
+    {
+      title: "New Connections",
+      value: summary?.totalNewConnections || 0,
+      suffix: "DBC",
+      icon: PackagePlus,
+      color: "text-indigo-600",
+      bg: "bg-indigo-50 dark:bg-indigo-900/20",
     },
     {
       title: "Total Deliveries",
@@ -292,7 +383,7 @@ export default function ReportsPage() {
           </p>
         </div>
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {[...Array(5)].map((_, i) => (
+          {[...Array(7)].map((_, i) => (
             <Skeleton key={i} className="h-32 rounded-xl" />
           ))}
         </div>
@@ -397,7 +488,7 @@ export default function ReportsPage() {
         variants={containerVariants}
         initial="hidden"
         animate="show"
-        className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5"
+        className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"
       >
         {statCards.map((card) => (
           <motion.div key={card.title} variants={itemVariants}>
@@ -438,8 +529,9 @@ export default function ReportsPage() {
                       <TableHead>Name</TableHead>
                       <TableHead className="text-right">Settlements</TableHead>
                       <TableHead className="text-right">Revenue</TableHead>
-                      <TableHead className="text-right">Expenses</TableHead>
-                      <TableHead className="text-right">Shortage</TableHead>
+                      <TableHead className="text-right">Credits</TableHead>
+                      <TableHead className="text-right">Debits</TableHead>
+                      <TableHead className="text-right">Amount Pending</TableHead>
                       <TableHead className="text-right">Deliveries</TableHead>
                     </TableRow>
                   </TableHeader>
@@ -457,11 +549,14 @@ export default function ReportsPage() {
                         <TableCell className="text-right text-emerald-600 font-medium">
                           {formatCurrency(staff.totalRevenue)}
                         </TableCell>
+                        <TableCell className="text-right text-sky-600">
+                          {formatCurrency(staff.totalCredits ?? 0)}
+                        </TableCell>
                         <TableCell className="text-right text-amber-600">
-                          {formatCurrency(staff.totalExpenses)}
+                          {formatCurrency(staff.totalDebits ?? staff.totalExpenses ?? 0)}
                         </TableCell>
                         <TableCell className="text-right text-red-600">
-                          {formatCurrency(staff.totalShortage)}
+                          {formatCurrency(staff.totalAmountPending ?? staff.totalShortage ?? 0)}
                         </TableCell>
                         <TableCell className="text-right">
                           {staff.totalDeliveries}
@@ -479,6 +574,125 @@ export default function ReportsPage() {
           </CardContent>
         </Card>
       </motion.div>
+
+      {/* Transaction Category Breakdown */}
+      {data?.transactionBreakdown && data.transactionBreakdown.length > 0 && (
+        <motion.div variants={itemVariants} initial="hidden" animate="show">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Transaction Category Breakdown</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Category</TableHead>
+                      <TableHead>Type</TableHead>
+                      <TableHead className="text-right">Total Amount</TableHead>
+                      <TableHead className="text-right">Count</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {data.transactionBreakdown.map((t, i) => (
+                      <TableRow key={i}>
+                        <TableCell className="font-medium">{t.category}</TableCell>
+                        <TableCell>
+                          <Badge variant={t.type === "credit" ? "success" : "destructive"}>
+                            {t.type}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-right font-medium">
+                          {formatCurrency(t.totalAmount)}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <Badge variant="secondary">{t.count}</Badge>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </CardContent>
+          </Card>
+        </motion.div>
+      )}
+
+      {/* New Connections Report */}
+      {data?.newConnectionReport && data.newConnectionReport.length > 0 && (
+        <motion.div variants={itemVariants} initial="hidden" animate="show">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">New Connections (DBC)</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                {data.newConnectionReport.map((nc) => (
+                  <div
+                    key={nc.cylinderSize}
+                    className="rounded-lg border border-indigo-200 dark:border-indigo-800 bg-indigo-50/50 dark:bg-indigo-900/10 p-4"
+                  >
+                    <div className="flex items-center justify-between mb-2">
+                      <p className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">
+                        {nc.cylinderSize}
+                      </p>
+                      <PackagePlus className="h-4 w-4 text-indigo-600" />
+                    </div>
+                    <p className="text-2xl font-bold text-indigo-600">{nc.count}</p>
+                    <p className="text-xs text-zinc-400 mt-0.5">new connections</p>
+                  </div>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        </motion.div>
+      )}
+
+      {/* Empty Reconciliation Report */}
+      {data?.emptyReconciliation && data.emptyReconciliation.length > 0 && (
+        <motion.div variants={itemVariants} initial="hidden" animate="show">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Empty Cylinder Reconciliation</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Cylinder Size</TableHead>
+                      <TableHead className="text-right">Total Issued</TableHead>
+                      <TableHead className="text-right">Total DBC</TableHead>
+                      <TableHead className="text-right">Expected Empties</TableHead>
+                      <TableHead className="text-right">Total Returned</TableHead>
+                      <TableHead className="text-right">Total Mismatch</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {data.emptyReconciliation.map((item) => (
+                      <TableRow
+                        key={item.cylinderSize}
+                        className={item.totalMismatch !== 0 ? "bg-red-50/50 dark:bg-red-900/10" : ""}
+                      >
+                        <TableCell className="font-medium">{item.cylinderSize}</TableCell>
+                        <TableCell className="text-right">{item.totalIssued}</TableCell>
+                        <TableCell className="text-right">{item.totalNewConnections}</TableCell>
+                        <TableCell className="text-right">{item.totalExpected}</TableCell>
+                        <TableCell className="text-right">{item.totalReturned}</TableCell>
+                        <TableCell className="text-right">
+                          <Badge variant={item.totalMismatch !== 0 ? "destructive" : "success"}>
+                            {item.totalMismatch}
+                          </Badge>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </CardContent>
+          </Card>
+        </motion.div>
+      )}
 
       {/* Cylinder Distribution */}
       <motion.div variants={itemVariants} initial="hidden" animate="show">

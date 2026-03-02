@@ -4,6 +4,7 @@ import { Settlement } from "@/lib/models/Settlement";
 import { Inventory } from "@/lib/models/Inventory";
 import { Staff } from "@/lib/models/Staff";
 import { requireAuth } from "@/lib/auth";
+import { normalizeSettlement, computeEmptyReconciliation } from "@/lib/settlement-utils";
 
 const LOW_STOCK_THRESHOLD = parseInt(process.env.LOW_STOCK_THRESHOLD || "10");
 
@@ -39,14 +40,51 @@ export async function GET(request: Request) {
       Staff.aggregate([{ $match: { isActive: true } }, { $group: { _id: null, total: { $sum: "$debtBalance" } } }]),
     ]);
 
-    const totalDeliveries = settlements.reduce(
-      (acc, s) => acc + s.items.reduce((a, i) => a + i.quantity, 0),
+    // Normalize all settlements to V3 format for consistent stats
+    const normalized = settlements.map((s) => {
+      const doc = s.toObject() as unknown as Record<string, unknown>;
+      return normalizeSettlement(doc);
+    });
+
+    const totalDeliveries = normalized.reduce(
+      (acc, s) => acc + ((s.items as Array<{ quantity: number }>).reduce((a, i) => a + i.quantity, 0)),
       0
     );
-    const totalRevenue = settlements.reduce((acc, s) => acc + s.grossRevenue, 0);
-    const totalExpenses = settlements.reduce((acc, s) => acc + s.expenses, 0);
-    const totalShortage = settlements.reduce((acc, s) => acc + s.shortage, 0);
-    const totalActualCash = settlements.reduce((acc, s) => acc + s.actualCash, 0);
+    const totalRevenue = normalized.reduce((acc, s) => acc + (s.grossRevenue as number), 0);
+    const totalExpenses = normalized.reduce((acc, s) => acc + (s.totalDebits as number), 0);
+    const totalShortage = normalized.reduce((acc, s) => acc + (s.amountPending as number), 0);
+    const totalActualCash = normalized.reduce((acc, s) => acc + (s.actualCashReceived as number), 0);
+    const totalCredits = normalized.reduce((acc, s) => acc + (s.totalCredits as number), 0);
+    const totalDebits = normalized.reduce((acc, s) => acc + (s.totalDebits as number), 0);
+    const totalAmountPending = normalized.reduce((acc, s) => acc + (s.amountPending as number), 0);
+
+    // Count new connections
+    const totalNewConnections = normalized.reduce((acc, s) => {
+      const items = s.items as Array<{ quantity: number; isNewConnection?: boolean }>;
+      return acc + items.filter((i) => i.isNewConnection).reduce((a, i) => a + i.quantity, 0);
+    }, 0);
+
+    // Empty reconciliation: aggregate per cylinder size across all settlements
+    const allItems: Array<{ cylinderSize: string; quantity: number; isNewConnection?: boolean }> = [];
+    const allEmpties: Array<{ cylinderSize: string; quantity: number }> = [];
+
+    for (const s of normalized) {
+      const items = s.items as Array<{ cylinderSize: string; quantity: number; isNewConnection?: boolean }>;
+      const empties = s.emptyCylindersReturned as Array<{ cylinderSize: string; quantity: number }>;
+      allItems.push(...items);
+      allEmpties.push(...empties);
+    }
+
+    const emptyReconciliation = computeEmptyReconciliation(
+      allItems.map((i) => ({
+        cylinderSize: i.cylinderSize,
+        quantity: i.quantity,
+        pricePerUnit: 0,
+        total: 0,
+        isNewConnection: i.isNewConnection,
+      })),
+      allEmpties
+    );
 
     // Low stock alerts
     const lowStockAlerts = inventory
@@ -64,12 +102,17 @@ export async function GET(request: Request) {
         totalExpenses,
         totalShortage,
         totalActualCash,
+        totalCredits,
+        totalDebits,
+        totalNewConnections,
+        totalAmountPending,
         staffCount,
         totalDebt: totalDebt[0]?.total || 0,
       },
       inventory,
       recentSettlements: settlements.slice(0, 10),
       lowStockAlerts,
+      emptyReconciliation,
       date: istDateStr,
     });
   } catch (error) {

@@ -3,7 +3,9 @@ import { connectDB, withTransaction } from "@/lib/db";
 import { Settlement } from "@/lib/models/Settlement";
 import { Staff } from "@/lib/models/Staff";
 import { Inventory } from "@/lib/models/Inventory";
+import { Customer } from "@/lib/models/Customer";
 import { requireAuth } from "@/lib/auth";
+import { computeSettlement } from "@/lib/settlement-utils";
 
 export async function GET(
   request: Request,
@@ -19,6 +21,7 @@ export async function GET(
     const settlement = await Settlement.findById(id)
       .populate("staff", "name phone")
       .populate("customer", "name phone")
+      .populate("debtors.customer", "name phone")
       .lean();
 
     if (!settlement) {
@@ -43,7 +46,22 @@ export async function PUT(
     await connectDB();
     const { id } = await params;
     const body = await request.json();
-    const { date, items, addPayment, reducePayment, expenses, actualCash, notes, denominations, denominationTotal } = body;
+    const {
+      date,
+      items,
+      transactions = [],
+      actualCashReceived,
+      notes,
+      denominations,
+      denominationTotal,
+      emptyCylindersReturned = [],
+      debtors = [],
+      // Legacy fields for backward compat
+      addPayment,
+      reducePayment,
+      expenses,
+      actualCash,
+    } = body;
 
     const result = await withTransaction(async (txSession) => {
       // Fetch the existing settlement
@@ -61,16 +79,34 @@ export async function PUT(
         );
       }
 
-      // Step 2: Reverse old debt (subtract old shortage from staff debtBalance)
-      if (oldSettlement.shortage > 0) {
+      // Step 2: Reverse old debt (use amountPending for V3, shortage for legacy)
+      const oldPending = oldSettlement.amountPending || oldSettlement.shortage || 0;
+      if (oldPending > 0) {
         await Staff.findByIdAndUpdate(
           oldSettlement.staff,
-          { $inc: { debtBalance: -oldSettlement.shortage } },
+          { $inc: { debtBalance: -oldPending } },
           { session: txSession }
         );
       }
 
-      // Step 3: Validate new stock levels and calculate new values
+      // Step 3: Reverse old customer debts from debtors
+      for (const d of oldSettlement.debtors || []) {
+        if (d.type === "cash" && d.amount && d.amount > 0) {
+          await Customer.findByIdAndUpdate(
+            d.customer,
+            { $inc: { cashDebt: -d.amount } },
+            { session: txSession }
+          );
+        } else if (d.type === "cylinder" && d.cylinderSize && d.quantity && d.quantity > 0) {
+          await Customer.findOneAndUpdate(
+            { _id: d.customer, "cylinderDebts.cylinderSize": d.cylinderSize },
+            { $inc: { "cylinderDebts.$.quantity": -d.quantity } },
+            { session: txSession }
+          );
+        }
+      }
+
+      // Step 4: Validate new stock levels and calculate new values
       let grossRevenue = 0;
       const processedItems = [];
 
@@ -86,7 +122,7 @@ export async function PUT(
           );
         }
 
-        const pricePerUnit = inventory.pricePerUnit;
+        const pricePerUnit = item.priceOverride != null ? item.priceOverride : inventory.pricePerUnit;
         const total = item.quantity * pricePerUnit;
         grossRevenue += total;
 
@@ -95,10 +131,11 @@ export async function PUT(
           quantity: item.quantity,
           pricePerUnit,
           total,
+          isNewConnection: item.isNewConnection || false,
         });
       }
 
-      // Step 4: Apply new inventory changes (subtract full, add empty)
+      // Step 5: Apply new inventory changes (subtract full, add empty)
       for (const item of items) {
         await Inventory.findOneAndUpdate(
           { cylinderSize: item.cylinderSize },
@@ -107,23 +144,52 @@ export async function PUT(
         );
       }
 
-      // Step 5: Recalculate settlement
-      const expectedCash = grossRevenue + (addPayment || 0) - (reducePayment || 0) - (expenses || 0);
-      const newShortage = Math.max(0, expectedCash - (actualCash || 0));
+      // Determine actual cash
+      const cashReceived = actualCashReceived != null ? actualCashReceived : (actualCash || 0);
 
-      // Step 6: Update the settlement
+      // Step 6: Use computeSettlement for calculations
+      const computed = computeSettlement(processedItems, transactions, cashReceived);
+
+      let finalComputed = computed;
+      if (transactions.length === 0 && (addPayment || reducePayment || expenses)) {
+        const legacyTransactions = [];
+        if (addPayment) legacyTransactions.push({ category: "Other", type: "credit" as const, amount: addPayment });
+        if (reducePayment) legacyTransactions.push({ category: "Discount", type: "debit" as const, amount: reducePayment });
+        if (expenses) legacyTransactions.push({ category: "Other", type: "debit" as const, amount: expenses });
+        finalComputed = computeSettlement(processedItems, legacyTransactions, cashReceived);
+      }
+
+      // Step 7: Update the settlement with V3 + legacy fields (dual-write)
       const updated = await Settlement.findByIdAndUpdate(
         id,
         {
           date: new Date(date),
           items: processedItems,
-          grossRevenue,
-          addPayment: addPayment || 0,
-          reducePayment: reducePayment || 0,
-          expenses: expenses || 0,
-          expectedCash,
-          actualCash: actualCash || 0,
-          shortage: newShortage,
+          grossRevenue: finalComputed.grossRevenue,
+          // V3 fields
+          transactions,
+          totalCredits: finalComputed.totalCredits,
+          totalDebits: finalComputed.totalDebits,
+          netRevenue: finalComputed.netRevenue,
+          actualCashReceived: cashReceived,
+          amountPending: finalComputed.amountPending,
+          emptyCylindersReturned,
+          debtors: debtors.map((d: { customerId: string; type: string; amount?: number; cylinderSize?: string; quantity?: number }) => ({
+            customer: d.customerId,
+            type: d.type,
+            amount: d.amount,
+            cylinderSize: d.cylinderSize,
+            quantity: d.quantity,
+          })),
+          schemaVersion: 3,
+          // Legacy fields (dual-write)
+          addPayment: finalComputed.addPayment,
+          reducePayment: finalComputed.reducePayment,
+          expenses: finalComputed.expenses,
+          expectedCash: finalComputed.expectedCash,
+          actualCash: cashReceived,
+          shortage: finalComputed.shortage,
+          // Common
           notes: notes || "",
           denominations: denominations || [],
           denominationTotal: denominationTotal || 0,
@@ -131,11 +197,35 @@ export async function PUT(
         { new: true, session: txSession }
       );
 
-      // Step 7: Apply new debt
-      if (newShortage > 0) {
+      // Step 8: Apply new debtor assignments
+      for (const d of debtors) {
+        if (d.type === "cash" && d.amount > 0) {
+          await Customer.findByIdAndUpdate(
+            d.customerId,
+            { $inc: { cashDebt: d.amount } },
+            { session: txSession }
+          );
+        } else if (d.type === "cylinder" && d.cylinderSize && d.quantity > 0) {
+          const updatedCustomer = await Customer.findOneAndUpdate(
+            { _id: d.customerId, "cylinderDebts.cylinderSize": d.cylinderSize },
+            { $inc: { "cylinderDebts.$.quantity": d.quantity } },
+            { session: txSession }
+          );
+          if (!updatedCustomer) {
+            await Customer.findByIdAndUpdate(
+              d.customerId,
+              { $push: { cylinderDebts: { cylinderSize: d.cylinderSize, quantity: d.quantity } } },
+              { session: txSession }
+            );
+          }
+        }
+      }
+
+      // Step 9: Apply new staff debt using amountPending
+      if (finalComputed.amountPending > 0) {
         await Staff.findByIdAndUpdate(
           oldSettlement.staff,
-          { $inc: { debtBalance: newShortage } },
+          { $inc: { debtBalance: finalComputed.amountPending } },
           { session: txSession }
         );
       }
@@ -145,7 +235,8 @@ export async function PUT(
 
     const populated = await Settlement.findById(result!._id)
       .populate("staff", "name phone")
-      .populate("customer", "name phone");
+      .populate("customer", "name phone")
+      .populate("debtors.customer", "name phone");
 
     return NextResponse.json(populated);
   } catch (error) {
@@ -183,16 +274,34 @@ export async function DELETE(
         );
       }
 
-      // Step 2: Reverse debt (subtract shortage from staff debtBalance)
-      if (settlement.shortage > 0) {
+      // Step 2: Reverse debt (use amountPending for V3, shortage for legacy)
+      const pending = settlement.amountPending || settlement.shortage || 0;
+      if (pending > 0) {
         await Staff.findByIdAndUpdate(
           settlement.staff,
-          { $inc: { debtBalance: -settlement.shortage } },
+          { $inc: { debtBalance: -pending } },
           { session: txSession }
         );
       }
 
-      // Step 3: Delete the settlement
+      // Step 3: Reverse customer debts from debtors
+      for (const d of settlement.debtors || []) {
+        if (d.type === "cash" && d.amount && d.amount > 0) {
+          await Customer.findByIdAndUpdate(
+            d.customer,
+            { $inc: { cashDebt: -d.amount } },
+            { session: txSession }
+          );
+        } else if (d.type === "cylinder" && d.cylinderSize && d.quantity && d.quantity > 0) {
+          await Customer.findOneAndUpdate(
+            { _id: d.customer, "cylinderDebts.cylinderSize": d.cylinderSize },
+            { $inc: { "cylinderDebts.$.quantity": -d.quantity } },
+            { session: txSession }
+          );
+        }
+      }
+
+      // Step 4: Delete the settlement
       await Settlement.findByIdAndDelete(id, { session: txSession });
     });
 

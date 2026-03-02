@@ -2,10 +2,11 @@
 
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { Package, TrendingUp, TrendingDown, AlertTriangle, Users, IndianRupee, ChevronLeft, ChevronRight, Calendar } from "lucide-react";
+import { Package, TrendingUp, TrendingDown, AlertTriangle, Users, IndianRupee, ChevronLeft, ChevronRight, Calendar, PackagePlus } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/utils";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -13,11 +14,16 @@ interface DashboardData {
   stats: {
     totalDeliveries: number;
     totalRevenue: number;
-    totalExpenses: number;
-    totalShortage: number;
+    totalCredits: number;
+    totalDebits: number;
+    totalNewConnections: number;
+    totalAmountPending: number;
     totalActualCash: number;
     staffCount: number;
     totalDebt: number;
+    // Legacy fallbacks
+    totalExpenses?: number;
+    totalShortage?: number;
   };
   inventory: Array<{
     cylinderSize: string;
@@ -25,12 +31,21 @@ interface DashboardData {
     emptyStock: number;
     pricePerUnit: number;
   }>;
+  emptyReconciliation?: Array<{
+    cylinderSize: string;
+    issued: number;
+    newConnections: number;
+    expected: number;
+    returned: number;
+    mismatch: number;
+  }>;
   recentSettlements: Array<{
     _id: string;
     staff: { name: string };
     date: string;
     grossRevenue: number;
     shortage: number;
+    amountPending?: number;
   }>;
   lowStockAlerts: Array<{
     cylinderSize: string;
@@ -97,8 +112,8 @@ export default function DashboardPage() {
           <h1 className="text-2xl font-bold">Dashboard</h1>
           <p className="text-zinc-500 text-sm mt-1">Daily overview and statistics</p>
         </div>
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {[...Array(4)].map((_, i) => (
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+          {[...Array(5)].map((_, i) => (
             <Skeleton key={i} className="h-32 rounded-xl" />
           ))}
         </div>
@@ -125,18 +140,26 @@ export default function DashboardPage() {
       bg: "bg-emerald-50 dark:bg-emerald-900/20",
     },
     {
-      title: "Total Expenses",
-      value: formatCurrency(stats?.totalExpenses || 0),
+      title: "Total Debits",
+      value: formatCurrency(stats?.totalDebits ?? stats?.totalExpenses ?? 0),
       icon: TrendingDown,
       color: "text-amber-600",
       bg: "bg-amber-50 dark:bg-amber-900/20",
     },
     {
-      title: "Total Shortage",
-      value: formatCurrency(stats?.totalShortage || 0),
+      title: "Amount Pending",
+      value: formatCurrency(stats?.totalAmountPending ?? stats?.totalShortage ?? 0),
       icon: AlertTriangle,
       color: "text-red-600",
       bg: "bg-red-50 dark:bg-red-900/20",
+    },
+    {
+      title: "New Connections",
+      value: stats?.totalNewConnections || 0,
+      suffix: "DBC",
+      icon: PackagePlus,
+      color: "text-indigo-600",
+      bg: "bg-indigo-50 dark:bg-indigo-900/20",
     },
   ];
 
@@ -200,7 +223,7 @@ export default function DashboardPage() {
         variants={containerVariants}
         initial="hidden"
         animate="show"
-        className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4"
+        className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5"
       >
         {statCards.map((card) => (
           <motion.div key={card.title} variants={itemVariants}>
@@ -288,7 +311,6 @@ export default function DashboardPage() {
           <CardContent>
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
               {data?.inventory.map((item) => {
-                const isLow = item.fullStock < (data?.lowStockAlerts?.find((a) => a.cylinderSize === item.cylinderSize) ? Infinity : -1);
                 const lowAlert = data?.lowStockAlerts?.find((a) => a.cylinderSize === item.cylinderSize);
                 return (
                   <div
@@ -324,6 +346,99 @@ export default function DashboardPage() {
           </CardContent>
         </Card>
       </motion.div>
+
+      {/* Empty Cylinder Reconciliation */}
+      {data?.emptyReconciliation && data.emptyReconciliation.length > 0 && (
+        <motion.div variants={itemVariants} initial="hidden" animate="show">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Empty Cylinder Reconciliation</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {/* Mobile card view */}
+              <div className="block sm:hidden space-y-3">
+                {data.emptyReconciliation.map((item) => (
+                  <div
+                    key={item.cylinderSize}
+                    className={`rounded-lg border p-4 ${
+                      item.mismatch !== 0
+                        ? "border-red-300 dark:border-red-700 bg-red-50/50 dark:bg-red-900/10"
+                        : "border-zinc-100 dark:border-zinc-800"
+                    }`}
+                  >
+                    <p className="text-sm font-semibold text-zinc-700 dark:text-zinc-300 mb-2">
+                      {item.cylinderSize}
+                    </p>
+                    <div className="grid grid-cols-3 gap-2 text-center text-sm">
+                      <div>
+                        <p className="text-xs text-zinc-500">Issued</p>
+                        <p className="font-semibold">{item.issued}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-zinc-500">DBC</p>
+                        <p className="font-semibold">{item.newConnections}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-zinc-500">Expected</p>
+                        <p className="font-semibold">{item.expected}</p>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-center text-sm mt-2">
+                      <div>
+                        <p className="text-xs text-zinc-500">Returned</p>
+                        <p className="font-semibold">{item.returned}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-zinc-500">Mismatch</p>
+                        <p className={`font-semibold ${item.mismatch !== 0 ? "text-red-600" : "text-emerald-600"}`}>
+                          {item.mismatch}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Desktop table view */}
+              <div className="hidden sm:block overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-zinc-200 dark:border-zinc-700">
+                      <th className="text-left py-2 px-3 font-medium text-zinc-500">Cylinder Size</th>
+                      <th className="text-right py-2 px-3 font-medium text-zinc-500">Issued</th>
+                      <th className="text-right py-2 px-3 font-medium text-zinc-500">DBC</th>
+                      <th className="text-right py-2 px-3 font-medium text-zinc-500">Expected Empties</th>
+                      <th className="text-right py-2 px-3 font-medium text-zinc-500">Returned</th>
+                      <th className="text-right py-2 px-3 font-medium text-zinc-500">Mismatch</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.emptyReconciliation.map((item) => (
+                      <tr
+                        key={item.cylinderSize}
+                        className={`border-b border-zinc-100 dark:border-zinc-800 ${
+                          item.mismatch !== 0 ? "bg-red-50/50 dark:bg-red-900/10" : ""
+                        }`}
+                      >
+                        <td className="py-2 px-3 font-medium">{item.cylinderSize}</td>
+                        <td className="text-right py-2 px-3">{item.issued}</td>
+                        <td className="text-right py-2 px-3">{item.newConnections}</td>
+                        <td className="text-right py-2 px-3">{item.expected}</td>
+                        <td className="text-right py-2 px-3">{item.returned}</td>
+                        <td className="text-right py-2 px-3">
+                          <Badge variant={item.mismatch !== 0 ? "destructive" : "success"}>
+                            {item.mismatch}
+                          </Badge>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </CardContent>
+          </Card>
+        </motion.div>
+      )}
     </div>
   );
 }

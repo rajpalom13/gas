@@ -36,14 +36,39 @@ import {
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DenominationEntry } from "@/components/denomination-entry";
+import { TransactionEntry } from "@/components/transaction-entry";
+import { EmptyCylinderEntry } from "@/components/empty-cylinder-entry";
+import { DebtorEntry } from "@/components/debtor-entry";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import { toast } from "@/lib/use-toast";
+import {
+  normalizeSettlement,
+  computeSettlement,
+  computeEmptyReconciliation,
+  type SettlementItemInput,
+} from "@/lib/settlement-utils";
 
 interface SettlementItem {
   cylinderSize: string;
   quantity: number;
   pricePerUnit: number;
   total: number;
+  isNewConnection?: boolean;
+}
+
+interface Transaction {
+  category: string;
+  type: "credit" | "debit";
+  amount: number;
+  note?: string;
+}
+
+interface DebtorData {
+  customer: { _id: string; name: string; phone?: string } | string;
+  type: "cash" | "cylinder";
+  amount?: number;
+  cylinderSize?: string;
+  quantity?: number;
 }
 
 interface Denomination {
@@ -59,12 +84,24 @@ interface SettlementData {
   date: string;
   items: SettlementItem[];
   grossRevenue: number;
+  // V3 fields
+  transactions: Transaction[];
+  totalCredits: number;
+  totalDebits: number;
+  netRevenue: number;
+  actualCashReceived: number;
+  amountPending: number;
+  emptyCylindersReturned: Array<{ cylinderSize: string; quantity: number }>;
+  debtors: DebtorData[];
+  schemaVersion: number;
+  // Legacy
   addPayment: number;
   reducePayment: number;
   expenses: number;
   expectedCash: number;
   actualCash: number;
   shortage: number;
+  // Common
   notes: string;
   denominations: Denomination[];
   denominationTotal: number;
@@ -78,9 +115,25 @@ interface InventoryOption {
   fullStock: number;
 }
 
+interface CustomerOption {
+  _id: string;
+  name: string;
+  phone?: string;
+}
+
 interface EditItem {
   cylinderSize: string;
   quantity: number;
+  isNewConnection: boolean;
+  priceOverride?: number;
+}
+
+interface EditDebtor {
+  customerId: string;
+  type: "cash" | "cylinder";
+  amount?: number;
+  cylinderSize?: string;
+  quantity?: number;
 }
 
 export default function SettlementDetailPage() {
@@ -96,12 +149,15 @@ export default function SettlementDetailPage() {
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [inventoryList, setInventoryList] = useState<InventoryOption[]>([]);
+  const [customerList, setCustomerList] = useState<CustomerOption[]>([]);
   const [editDate, setEditDate] = useState("");
   const [editItems, setEditItems] = useState<EditItem[]>([]);
-  const [editAddPayment, setEditAddPayment] = useState(0);
-  const [editReducePayment, setEditReducePayment] = useState(0);
-  const [editExpenses, setEditExpenses] = useState(0);
+  const [editTransactions, setEditTransactions] = useState<Transaction[]>([]);
   const [editActualCash, setEditActualCash] = useState(0);
+  const [editEmptyCylindersReturned, setEditEmptyCylindersReturned] = useState<
+    Array<{ cylinderSize: string; quantity: number }>
+  >([]);
+  const [editDebtors, setEditDebtors] = useState<EditDebtor[]>([]);
   const [editNotes, setEditNotes] = useState("");
   const [editDenominations, setEditDenominations] = useState<Denomination[]>([]);
 
@@ -114,10 +170,16 @@ export default function SettlementDetailPage() {
         return r.json();
       })
       .then((data) => {
-        setSettlement(data);
+        // Normalize legacy settlements to V3 format
+        const normalized = normalizeSettlement(data) as unknown as SettlementData;
+        setSettlement(normalized);
       })
       .catch(() => {
-        toast({ title: "Error", description: "Settlement not found", variant: "destructive" });
+        toast({
+          title: "Error",
+          description: "Settlement not found",
+          variant: "destructive",
+        });
         router.push("/settlements");
       })
       .finally(() => setLoading(false));
@@ -125,24 +187,40 @@ export default function SettlementDetailPage() {
 
   const startEditing = () => {
     if (!settlement) return;
-    // Fetch inventory for edit form
-    fetch("/api/inventory")
-      .then((r) => r.json())
-      .then((inv) => setInventoryList(inv));
+    // Fetch inventory and customers for edit form
+    Promise.all([
+      fetch("/api/inventory").then((r) => r.json()),
+      fetch("/api/customers").then((r) => r.json()),
+    ]).then(([inv, c]) => {
+      setInventoryList(inv);
+      setCustomerList(c.customers || []);
+    });
 
     setEditDate(new Date(settlement.date).toISOString().split("T")[0]);
     setEditItems(
       settlement.items.map((item) => ({
         cylinderSize: item.cylinderSize,
         quantity: item.quantity,
+        isNewConnection: item.isNewConnection || false,
+        priceOverride: undefined,
       }))
     );
-    setEditAddPayment(settlement.addPayment);
-    setEditReducePayment(settlement.reducePayment);
-    setEditExpenses(settlement.expenses);
-    setEditActualCash(settlement.actualCash);
+    setEditTransactions(settlement.transactions || []);
+    setEditActualCash(settlement.actualCashReceived || settlement.actualCash || 0);
+    setEditEmptyCylindersReturned(settlement.emptyCylindersReturned || []);
+    setEditDebtors(
+      (settlement.debtors || []).map((d) => ({
+        customerId: typeof d.customer === "string" ? d.customer : d.customer._id,
+        type: d.type,
+        amount: d.amount,
+        cylinderSize: d.cylinderSize,
+        quantity: d.quantity,
+      }))
+    );
     setEditNotes(settlement.notes);
-    setEditDenominations(settlement.denominations.length > 0 ? settlement.denominations : []);
+    setEditDenominations(
+      settlement.denominations.length > 0 ? settlement.denominations : []
+    );
     setEditing(true);
   };
 
@@ -150,26 +228,48 @@ export default function SettlementDetailPage() {
     setEditing(false);
   };
 
-  const getPrice = (size: string) => {
-    return inventoryList.find((i) => i.cylinderSize === size)?.pricePerUnit || 0;
+  const getPrice = (item: EditItem) => {
+    if (item.priceOverride && item.priceOverride > 0) return item.priceOverride;
+    return (
+      inventoryList.find((i) => i.cylinderSize === item.cylinderSize)?.pricePerUnit || 0
+    );
   };
 
-  const editGrossRevenue = editItems.reduce(
-    (acc, item) => acc + item.quantity * getPrice(item.cylinderSize),
-    0
+  const editComputedItems = editItems
+    .filter((i) => i.cylinderSize && i.quantity > 0)
+    .map((item) => {
+      const price = getPrice(item);
+      return {
+        cylinderSize: item.cylinderSize,
+        quantity: item.quantity,
+        pricePerUnit: price,
+        total: item.quantity * price,
+        isNewConnection: item.isNewConnection,
+      };
+    });
+
+  const editSettlement = computeSettlement(
+    editComputedItems,
+    editTransactions,
+    editActualCash
   );
-  const editExpectedCash = editGrossRevenue + editAddPayment - editReducePayment - editExpenses;
-  const editShortage = Math.max(0, editExpectedCash - editActualCash);
 
   const addEditItem = () => {
-    setEditItems([...editItems, { cylinderSize: "", quantity: 0 }]);
+    setEditItems([
+      ...editItems,
+      { cylinderSize: "", quantity: 0, isNewConnection: false },
+    ]);
   };
 
   const removeEditItem = (index: number) => {
     setEditItems(editItems.filter((_, i) => i !== index));
   };
 
-  const updateEditItem = (index: number, field: keyof EditItem, value: string | number) => {
+  const updateEditItem = (
+    index: number,
+    field: keyof EditItem,
+    value: string | number | boolean
+  ) => {
     const newItems = [...editItems];
     newItems[index] = { ...newItems[index], [field]: value };
     setEditItems(newItems);
@@ -181,8 +281,9 @@ export default function SettlementDetailPage() {
     if (!item.cylinderSize || item.quantity <= 0) return null;
     const inv = inventoryList.find((i) => i.cylinderSize === item.cylinderSize);
     if (!inv) return null;
-    // Account for the old settlement's items being reversed
-    const oldItem = settlement?.items.find((oi) => oi.cylinderSize === item.cylinderSize);
+    const oldItem = settlement?.items.find(
+      (oi) => oi.cylinderSize === item.cylinderSize
+    );
     const availableStock = inv.fullStock + (oldItem?.quantity || 0);
     if (item.quantity > availableStock) {
       return `Only ${availableStock} available after rollback`;
@@ -209,11 +310,28 @@ export default function SettlementDetailPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           date: editDate,
-          items: editItems.filter((i) => i.cylinderSize && i.quantity > 0),
-          addPayment: editAddPayment,
-          reducePayment: editReducePayment,
-          expenses: editExpenses,
+          items: editComputedItems.map((item) => ({
+            cylinderSize: item.cylinderSize,
+            quantity: item.quantity,
+            isNewConnection: item.isNewConnection,
+            priceOverride: editItems.find(
+              (i) => i.cylinderSize === item.cylinderSize
+            )?.priceOverride,
+          })),
+          transactions: editTransactions.filter((t) => t.category && t.amount > 0),
           actualCash: editActualCash,
+          emptyCylindersReturned: editEmptyCylindersReturned.filter(
+            (e) => e.quantity > 0
+          ),
+          debtors: editDebtors
+            .filter((d) => d.customerId)
+            .map((d) => ({
+              customerId: d.customerId,
+              type: d.type,
+              amount: d.amount,
+              cylinderSize: d.cylinderSize,
+              quantity: d.quantity,
+            })),
           notes: editNotes,
           denominations: editDenominations.filter((d) => d.count > 0),
           denominationTotal: editDenominations.reduce((sum, d) => sum + d.total, 0),
@@ -222,7 +340,8 @@ export default function SettlementDetailPage() {
 
       if (res.ok) {
         const updated = await res.json();
-        setSettlement(updated);
+        const normalized = normalizeSettlement(updated) as unknown as SettlementData;
+        setSettlement(normalized);
         setEditing(false);
         toast({
           title: "Settlement updated",
@@ -238,7 +357,11 @@ export default function SettlementDetailPage() {
         });
       }
     } catch {
-      toast({ title: "Error", description: "Network error", variant: "destructive" });
+      toast({
+        title: "Error",
+        description: "Network error",
+        variant: "destructive",
+      });
     } finally {
       setSaving(false);
     }
@@ -265,7 +388,11 @@ export default function SettlementDetailPage() {
         setDeleting(false);
       }
     } catch {
-      toast({ title: "Error", description: "Network error", variant: "destructive" });
+      toast({
+        title: "Error",
+        description: "Network error",
+        variant: "destructive",
+      });
       setDeleting(false);
     }
     setShowDeleteDialog(false);
@@ -287,6 +414,9 @@ export default function SettlementDetailPage() {
 
   if (!settlement) return null;
 
+  // Normalized V3 data
+  const s = settlement;
+
   // --- EDIT MODE ---
   if (editing) {
     return (
@@ -298,12 +428,17 @@ export default function SettlementDetailPage() {
           <div>
             <h1 className="text-2xl font-bold">Edit Settlement</h1>
             <p className="text-zinc-500 text-sm mt-1">
-              Staff: {settlement.staff.name} -- Editing will rollback and re-apply inventory
+              Staff: {settlement.staff.name} -- Editing will rollback and re-apply
+              inventory
             </p>
           </div>
         </div>
 
-        <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
+        <motion.div
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="space-y-6"
+        >
           {/* Date */}
           <Card>
             <CardHeader>
@@ -312,12 +447,21 @@ export default function SettlementDetailPage() {
             <CardContent className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
                 <Label>Staff Member</Label>
-                <Input value={settlement.staff.name} disabled className="bg-zinc-50 dark:bg-zinc-900" />
+                <Input
+                  value={settlement.staff.name}
+                  disabled
+                  className="bg-zinc-50 dark:bg-zinc-900"
+                />
                 <p className="text-xs text-zinc-400">Staff cannot be changed</p>
               </div>
               <div className="space-y-2">
                 <Label>Date *</Label>
-                <Input type="date" value={editDate} onChange={(e) => setEditDate(e.target.value)} required />
+                <Input
+                  type="date"
+                  value={editDate}
+                  onChange={(e) => setEditDate(e.target.value)}
+                  required
+                />
               </div>
             </CardContent>
           </Card>
@@ -327,7 +471,12 @@ export default function SettlementDetailPage() {
             <CardHeader>
               <div className="flex items-center justify-between">
                 <CardTitle className="text-base">Cylinders Delivered</CardTitle>
-                <Button type="button" variant="outline" size="sm" onClick={addEditItem}>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={addEditItem}
+                >
                   <Plus className="h-3 w-3" />
                   Add Cylinder
                 </Button>
@@ -337,113 +486,203 @@ export default function SettlementDetailPage() {
               {editItems.map((item, idx) => {
                 const stockWarning = getStockWarning(item);
                 const availableSizes = inventoryList.filter(
-                  (inv) => inv.cylinderSize === item.cylinderSize || !selectedSizes.includes(inv.cylinderSize)
+                  (inv) =>
+                    inv.cylinderSize === item.cylinderSize ||
+                    !selectedSizes.includes(inv.cylinderSize)
                 );
+                const price = getPrice(item);
                 return (
                   <div key={idx} className="space-y-1">
-                    <div className="flex items-end gap-3">
-                      <div className="flex-1 space-y-1">
+                    <div className="flex items-end gap-3 flex-wrap">
+                      <div className="flex-1 min-w-[140px] space-y-1">
                         <Label className="text-xs">Size</Label>
                         <Select
                           value={item.cylinderSize}
-                          onValueChange={(v) => updateEditItem(idx, "cylinderSize", v)}
+                          onValueChange={(v) =>
+                            updateEditItem(idx, "cylinderSize", v)
+                          }
                         >
                           <SelectTrigger>
                             <SelectValue placeholder="Select size" />
                           </SelectTrigger>
                           <SelectContent>
                             {availableSizes.map((inv) => (
-                              <SelectItem key={inv.cylinderSize} value={inv.cylinderSize}>
-                                {inv.cylinderSize} -- {formatCurrency(inv.pricePerUnit)} (Stock: {inv.fullStock})
+                              <SelectItem
+                                key={inv.cylinderSize}
+                                value={inv.cylinderSize}
+                              >
+                                {inv.cylinderSize} —{" "}
+                                {formatCurrency(inv.pricePerUnit)} (Stock:{" "}
+                                {inv.fullStock})
                               </SelectItem>
                             ))}
                           </SelectContent>
                         </Select>
                       </div>
-                      <div className="w-24 space-y-1">
+                      <div className="w-20 space-y-1">
                         <Label className="text-xs">Qty</Label>
                         <Input
                           type="number"
                           min={0}
                           value={item.quantity || ""}
-                          onChange={(e) => updateEditItem(idx, "quantity", parseInt(e.target.value) || 0)}
+                          onChange={(e) =>
+                            updateEditItem(
+                              idx,
+                              "quantity",
+                              parseInt(e.target.value) || 0
+                            )
+                          }
                         />
                       </div>
-                      <div className="w-28 text-right">
+                      <div className="w-28 space-y-1">
+                        <Label className="text-xs">Price Override</Label>
+                        <Input
+                          type="number"
+                          min={0}
+                          value={item.priceOverride || ""}
+                          onChange={(e) =>
+                            updateEditItem(
+                              idx,
+                              "priceOverride",
+                              parseFloat(e.target.value) || 0
+                            )
+                          }
+                          placeholder="Default"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-xs">DBC</Label>
+                        <Button
+                          type="button"
+                          variant={item.isNewConnection ? "default" : "outline"}
+                          size="sm"
+                          className={`w-16 ${
+                            item.isNewConnection
+                              ? "bg-blue-600 hover:bg-blue-700 text-white"
+                              : ""
+                          }`}
+                          onClick={() =>
+                            updateEditItem(
+                              idx,
+                              "isNewConnection",
+                              !item.isNewConnection
+                            )
+                          }
+                        >
+                          {item.isNewConnection ? "Yes" : "No"}
+                        </Button>
+                      </div>
+                      <div className="w-24 text-right">
                         <p className="text-sm font-medium">
-                          {formatCurrency(item.quantity * getPrice(item.cylinderSize))}
+                          {formatCurrency(item.quantity * price)}
                         </p>
                       </div>
                       {editItems.length > 1 && (
-                        <Button type="button" variant="ghost" size="icon" onClick={() => removeEditItem(idx)}>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => removeEditItem(idx)}
+                        >
                           <Trash2 className="h-4 w-4 text-red-500" />
                         </Button>
                       )}
                     </div>
-                    {stockWarning && <p className="text-xs text-amber-600 pl-1">{stockWarning}</p>}
+                    {stockWarning && (
+                      <p className="text-xs text-amber-600 pl-1">{stockWarning}</p>
+                    )}
+                    {item.isNewConnection && (
+                      <Badge
+                        variant="default"
+                        className="text-[10px] bg-blue-600"
+                      >
+                        New Connection (DBC) - No empty return expected
+                      </Badge>
+                    )}
                   </div>
                 );
               })}
               <div className="text-right pt-2 border-t border-zinc-100 dark:border-zinc-800">
                 <p className="text-sm text-zinc-500">Gross Revenue</p>
-                <p className="text-xl font-bold">{formatCurrency(editGrossRevenue)}</p>
+                <p className="text-xl font-bold">
+                  {formatCurrency(editSettlement.grossRevenue)}
+                </p>
               </div>
             </CardContent>
           </Card>
 
-          {/* Payments & Cash */}
+          {/* Transactions */}
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">Payments & Cash</CardTitle>
+              <CardTitle className="text-base">Transactions</CardTitle>
             </CardHeader>
-            <CardContent className="grid gap-4 sm:grid-cols-2">
-              <div className="space-y-2">
-                <Label>Add Payment (Extra collected)</Label>
-                <Input
-                  type="number"
-                  min={0}
-                  value={editAddPayment || ""}
-                  onChange={(e) => setEditAddPayment(parseFloat(e.target.value) || 0)}
-                  placeholder="0"
-                />
-              </div>
-              <div className="space-y-2">
-                <Label>Reduce Payment (Discounts/Returns)</Label>
-                <Input
-                  type="number"
-                  min={0}
-                  value={editReducePayment || ""}
-                  onChange={(e) => setEditReducePayment(parseFloat(e.target.value) || 0)}
-                  placeholder="0"
-                />
-              </div>
-              <div className="space-y-2">
-                <Label>Expenses</Label>
-                <Input
-                  type="number"
-                  min={0}
-                  value={editExpenses || ""}
-                  onChange={(e) => setEditExpenses(parseFloat(e.target.value) || 0)}
-                  placeholder="0"
-                />
-              </div>
-              <div className="space-y-2">
-                <Label>Actual Cash Received *</Label>
-                <Input
-                  type="number"
-                  min={0}
-                  value={editActualCash || ""}
-                  onChange={(e) => setEditActualCash(parseFloat(e.target.value) || 0)}
-                  placeholder="0"
-                />
+            <CardContent className="space-y-4">
+              <TransactionEntry
+                transactions={editTransactions}
+                onChange={setEditTransactions}
+              />
+              <div className="pt-4 border-t border-zinc-200 dark:border-zinc-800">
+                <div className="space-y-2">
+                  <Label>Actual Cash Received *</Label>
+                  <Input
+                    type="number"
+                    min={0}
+                    value={editActualCash || ""}
+                    onChange={(e) =>
+                      setEditActualCash(parseFloat(e.target.value) || 0)
+                    }
+                    placeholder="0"
+                  />
+                </div>
               </div>
             </CardContent>
           </Card>
+
+          {/* Empty Cylinders Returned */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Empty Cylinders Returned</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <EmptyCylinderEntry
+                items={editItems.filter((i) => i.cylinderSize && i.quantity > 0)}
+                emptyCylindersReturned={editEmptyCylindersReturned}
+                onChange={setEditEmptyCylindersReturned}
+              />
+            </CardContent>
+          </Card>
+
+          {/* Debtor Assignment */}
+          {(editSettlement.amountPending > 0 || editDebtors.length > 0) && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Debtor Assignment</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {editSettlement.amountPending > 0 && (
+                  <div className="rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 p-3 mb-4">
+                    <p className="text-sm text-amber-700 dark:text-amber-400">
+                      Amount pending:{" "}
+                      {formatCurrency(editSettlement.amountPending)}. Assign
+                      debtors below.
+                    </p>
+                  </div>
+                )}
+                <DebtorEntry
+                  debtors={editDebtors}
+                  onChange={setEditDebtors}
+                  customers={customerList}
+                />
+              </CardContent>
+            </Card>
+          )}
 
           {/* Denomination Entry */}
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">Cash Denomination (Optional)</CardTitle>
+              <CardTitle className="text-base">
+                Cash Denomination (Optional)
+              </CardTitle>
             </CardHeader>
             <CardContent>
               <DenominationEntry
@@ -477,23 +716,47 @@ export default function SettlementDetailPage() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                 <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
                   <p className="text-xs text-zinc-500">Gross Revenue</p>
-                  <p className="text-lg font-bold text-emerald-600">{formatCurrency(editGrossRevenue)}</p>
+                  <p className="text-lg font-bold text-emerald-600">
+                    {formatCurrency(editSettlement.grossRevenue)}
+                  </p>
                 </div>
                 <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
-                  <p className="text-xs text-zinc-500">Expected Cash</p>
-                  <p className="text-lg font-bold">{formatCurrency(editExpectedCash)}</p>
+                  <p className="text-xs text-zinc-500">+ Credits</p>
+                  <p className="text-lg font-bold text-blue-600">
+                    {formatCurrency(editSettlement.totalCredits)}
+                  </p>
+                </div>
+                <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
+                  <p className="text-xs text-zinc-500">- Debits</p>
+                  <p className="text-lg font-bold text-orange-600">
+                    {formatCurrency(editSettlement.totalDebits)}
+                  </p>
+                </div>
+                <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
+                  <p className="text-xs text-zinc-500">Net Revenue</p>
+                  <p className="text-lg font-bold">
+                    {formatCurrency(editSettlement.netRevenue)}
+                  </p>
                 </div>
                 <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
                   <p className="text-xs text-zinc-500">Actual Cash</p>
-                  <p className="text-lg font-bold text-blue-600">{formatCurrency(editActualCash)}</p>
+                  <p className="text-lg font-bold text-blue-600">
+                    {formatCurrency(editActualCash)}
+                  </p>
                 </div>
                 <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
-                  <p className="text-xs text-zinc-500">Shortage</p>
-                  <p className={`text-lg font-bold ${editShortage > 0 ? "text-red-600" : "text-emerald-600"}`}>
-                    {formatCurrency(editShortage)}
+                  <p className="text-xs text-zinc-500">Amount Pending</p>
+                  <p
+                    className={`text-lg font-bold ${
+                      editSettlement.amountPending > 0
+                        ? "text-red-600"
+                        : "text-emerald-600"
+                    }`}
+                  >
+                    {formatCurrency(editSettlement.amountPending)}
                   </p>
                 </div>
               </div>
@@ -504,7 +767,11 @@ export default function SettlementDetailPage() {
             <Button type="button" variant="outline" onClick={cancelEditing}>
               Cancel
             </Button>
-            <Button size="lg" disabled={saving || !hasValidItems} onClick={handleSave}>
+            <Button
+              size="lg"
+              disabled={saving || !hasValidItems}
+              onClick={handleSave}
+            >
               {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
               Save Changes
             </Button>
@@ -515,6 +782,20 @@ export default function SettlementDetailPage() {
   }
 
   // --- VIEW MODE ---
+  // Compute empty cylinder reconciliation for view mode
+  const viewItemInputs: SettlementItemInput[] = s.items.map((item) => ({
+    cylinderSize: item.cylinderSize,
+    quantity: item.quantity,
+    pricePerUnit: item.pricePerUnit,
+    total: item.total,
+    isNewConnection: item.isNewConnection,
+  }));
+  const emptyReconciliation = computeEmptyReconciliation(
+    viewItemInputs,
+    s.emptyCylindersReturned || []
+  );
+  const totalDBC = s.items.filter((i) => i.isNewConnection).reduce((sum, i) => sum + i.quantity, 0);
+
   return (
     <div className="space-y-6 max-w-4xl">
       {/* Header */}
@@ -528,7 +809,7 @@ export default function SettlementDetailPage() {
           <div>
             <h1 className="text-2xl font-bold">Settlement Details</h1>
             <p className="text-zinc-500 text-sm mt-1">
-              {formatDate(settlement.date)} -- {settlement.staff.name}
+              {formatDate(s.date)} -- {s.staff.name}
             </p>
           </div>
         </div>
@@ -537,14 +818,21 @@ export default function SettlementDetailPage() {
             <Pencil className="h-4 w-4" />
             Edit
           </Button>
-          <Button variant="destructive" onClick={() => setShowDeleteDialog(true)}>
+          <Button
+            variant="destructive"
+            onClick={() => setShowDeleteDialog(true)}
+          >
             <Trash2 className="h-4 w-4" />
             Delete
           </Button>
         </div>
       </div>
 
-      <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
+      <motion.div
+        initial={{ opacity: 0, y: 12 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="space-y-6"
+      >
         {/* Basic Info */}
         <Card>
           <CardHeader>
@@ -558,7 +846,7 @@ export default function SettlementDetailPage() {
                 </div>
                 <div>
                   <p className="text-xs text-zinc-500">Staff</p>
-                  <p className="font-medium">{settlement.staff.name}</p>
+                  <p className="font-medium">{s.staff.name}</p>
                 </div>
               </div>
               <div className="flex items-center gap-3">
@@ -567,17 +855,17 @@ export default function SettlementDetailPage() {
                 </div>
                 <div>
                   <p className="text-xs text-zinc-500">Date</p>
-                  <p className="font-medium">{formatDate(settlement.date)}</p>
+                  <p className="font-medium">{formatDate(s.date)}</p>
                 </div>
               </div>
-              {settlement.customer && (
+              {s.customer && (
                 <div className="flex items-center gap-3">
                   <div className="p-2 rounded-lg bg-emerald-50 dark:bg-emerald-900/20">
                     <User className="h-4 w-4 text-emerald-600" />
                   </div>
                   <div>
                     <p className="text-xs text-zinc-500">Customer</p>
-                    <p className="font-medium">{settlement.customer.name}</p>
+                    <p className="font-medium">{s.customer.name}</p>
                   </div>
                 </div>
               )}
@@ -588,11 +876,18 @@ export default function SettlementDetailPage() {
         {/* Cylinders */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">Cylinders Delivered</CardTitle>
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-base">Cylinders Delivered</CardTitle>
+              {totalDBC > 0 && (
+                <Badge variant="default" className="bg-blue-600">
+                  {totalDBC} DBC
+                </Badge>
+              )}
+            </div>
           </CardHeader>
           <CardContent>
             <div className="space-y-2">
-              {settlement.items.map((item, idx) => (
+              {s.items.map((item, idx) => (
                 <div
                   key={idx}
                   className="flex items-center justify-between p-3 rounded-lg bg-zinc-50 dark:bg-zinc-900"
@@ -602,19 +897,195 @@ export default function SettlementDetailPage() {
                     <span className="text-sm text-zinc-500">
                       {item.quantity} x {formatCurrency(item.pricePerUnit)}
                     </span>
+                    {item.isNewConnection && (
+                      <Badge
+                        variant="default"
+                        className="text-[10px] bg-blue-600"
+                      >
+                        DBC
+                      </Badge>
+                    )}
                   </div>
-                  <span className="font-semibold">{formatCurrency(item.total)}</span>
+                  <span className="font-semibold">
+                    {formatCurrency(item.total)}
+                  </span>
                 </div>
               ))}
               <div className="flex items-center justify-between pt-3 border-t border-zinc-200 dark:border-zinc-800">
                 <span className="text-sm text-zinc-500">Gross Revenue</span>
                 <span className="text-xl font-bold text-emerald-600">
-                  {formatCurrency(settlement.grossRevenue)}
+                  {formatCurrency(s.grossRevenue)}
                 </span>
               </div>
             </div>
           </CardContent>
         </Card>
+
+        {/* Transactions */}
+        {s.transactions && s.transactions.length > 0 && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Transactions</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-2">
+                {s.transactions.map((txn, idx) => (
+                  <div
+                    key={idx}
+                    className="flex items-center justify-between p-3 rounded-lg bg-zinc-50 dark:bg-zinc-900"
+                  >
+                    <div className="flex items-center gap-2">
+                      <Badge
+                        variant={
+                          txn.type === "credit" ? "success" : "destructive"
+                        }
+                        className="text-[10px]"
+                      >
+                        {txn.type}
+                      </Badge>
+                      <Badge variant="secondary" className="text-[10px]">
+                        {txn.category}
+                      </Badge>
+                      {txn.note && (
+                        <span className="text-xs text-zinc-400">
+                          {txn.note}
+                        </span>
+                      )}
+                    </div>
+                    <span
+                      className={`font-semibold ${
+                        txn.type === "credit"
+                          ? "text-emerald-600"
+                          : "text-red-600"
+                      }`}
+                    >
+                      {txn.type === "credit" ? "+" : "-"}
+                      {formatCurrency(txn.amount)}
+                    </span>
+                  </div>
+                ))}
+                <div className="flex items-center justify-between pt-3 border-t border-zinc-200 dark:border-zinc-800 flex-wrap gap-2">
+                  <div className="flex gap-3">
+                    <span className="text-xs text-zinc-500">
+                      Credits:{" "}
+                      <span className="font-medium text-emerald-600">
+                        {formatCurrency(s.totalCredits)}
+                      </span>
+                    </span>
+                    <span className="text-xs text-zinc-500">
+                      Debits:{" "}
+                      <span className="font-medium text-red-600">
+                        {formatCurrency(s.totalDebits)}
+                      </span>
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Empty Cylinder Reconciliation */}
+        {emptyReconciliation.length > 0 && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">
+                Empty Cylinder Reconciliation
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-2">
+                {emptyReconciliation.map((row) => (
+                  <div
+                    key={row.cylinderSize}
+                    className={`flex items-center justify-between p-3 rounded-lg ${
+                      row.mismatch !== 0
+                        ? "bg-amber-50 dark:bg-amber-900/10 border border-amber-200 dark:border-amber-800"
+                        : "bg-zinc-50 dark:bg-zinc-900"
+                    }`}
+                  >
+                    <div className="flex items-center gap-3">
+                      <Badge variant="secondary">{row.cylinderSize}</Badge>
+                      <span className="text-sm text-zinc-500">
+                        Issued: {row.issued}
+                        {row.newConnections > 0 && (
+                          <span className="text-blue-600">
+                            {" "}
+                            (DBC: {row.newConnections})
+                          </span>
+                        )}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <span className="text-sm text-zinc-500">
+                        Expected: {row.expected}
+                      </span>
+                      <span className="text-sm font-medium">
+                        Returned: {row.returned}
+                      </span>
+                      {row.mismatch !== 0 && (
+                        <Badge variant="warning" className="text-[10px]">
+                          {row.mismatch > 0
+                            ? `${row.mismatch} short`
+                            : `${Math.abs(row.mismatch)} extra`}
+                        </Badge>
+                      )}
+                      {row.mismatch === 0 && row.expected > 0 && (
+                        <Badge variant="success" className="text-[10px]">
+                          OK
+                        </Badge>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Debtors */}
+        {s.debtors && s.debtors.length > 0 && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Debtors</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-2">
+                {s.debtors.map((debtor, idx) => {
+                  const customerName =
+                    typeof debtor.customer === "string"
+                      ? debtor.customer
+                      : debtor.customer?.name || "Unknown";
+                  return (
+                    <div
+                      key={idx}
+                      className="flex items-center justify-between p-3 rounded-lg bg-zinc-50 dark:bg-zinc-900"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium text-sm">
+                          {customerName}
+                        </span>
+                        <Badge
+                          variant={
+                            debtor.type === "cash" ? "warning" : "secondary"
+                          }
+                          className="text-[10px]"
+                        >
+                          {debtor.type}
+                        </Badge>
+                      </div>
+                      <span className="text-sm font-semibold">
+                        {debtor.type === "cash"
+                          ? formatCurrency(debtor.amount || 0)
+                          : `${debtor.quantity}x ${debtor.cylinderSize}`}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </CardContent>
+          </Card>
+        )}
 
         {/* Financial Summary */}
         <Card className="bg-zinc-50 dark:bg-zinc-900 border-2">
@@ -625,40 +1096,45 @@ export default function SettlementDetailPage() {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
               <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
                 <p className="text-xs text-zinc-500">Gross Revenue</p>
-                <p className="text-lg font-bold text-emerald-600">{formatCurrency(settlement.grossRevenue)}</p>
+                <p className="text-lg font-bold text-emerald-600">
+                  {formatCurrency(s.grossRevenue)}
+                </p>
               </div>
               <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
-                <p className="text-xs text-zinc-500">Add Payment</p>
-                <p className="text-lg font-bold text-blue-600">{formatCurrency(settlement.addPayment)}</p>
+                <p className="text-xs text-zinc-500">+ Credits</p>
+                <p className="text-lg font-bold text-blue-600">
+                  {formatCurrency(s.totalCredits)}
+                </p>
               </div>
               <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
-                <p className="text-xs text-zinc-500">Reduce Payment</p>
-                <p className="text-lg font-bold text-orange-600">{formatCurrency(settlement.reducePayment)}</p>
+                <p className="text-xs text-zinc-500">- Debits</p>
+                <p className="text-lg font-bold text-orange-600">
+                  {formatCurrency(s.totalDebits)}
+                </p>
               </div>
               <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
-                <p className="text-xs text-zinc-500">Expenses</p>
-                <p className="text-lg font-bold text-amber-600">{formatCurrency(settlement.expenses)}</p>
-              </div>
-            </div>
-
-            <div className="grid gap-3 sm:grid-cols-3 mt-3">
-              <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
-                <p className="text-xs text-zinc-500">Expected Cash</p>
-                <p className="text-lg font-bold">{formatCurrency(settlement.expectedCash)}</p>
+                <p className="text-xs text-zinc-500">Net Revenue</p>
+                <p className="text-lg font-bold">
+                  {formatCurrency(s.netRevenue)}
+                </p>
               </div>
               <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
                 <p className="text-xs text-zinc-500">Actual Cash</p>
-                <p className="text-lg font-bold text-blue-600">{formatCurrency(settlement.actualCash)}</p>
+                <p className="text-lg font-bold text-blue-600">
+                  {formatCurrency(s.actualCashReceived)}
+                </p>
               </div>
               <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
-                <p className="text-xs text-zinc-500">Shortage</p>
+                <p className="text-xs text-zinc-500">Amount Pending</p>
                 <p
-                  className={`text-lg font-bold ${settlement.shortage > 0 ? "text-red-600" : "text-emerald-600"}`}
+                  className={`text-lg font-bold ${
+                    s.amountPending > 0 ? "text-red-600" : "text-emerald-600"
+                  }`}
                 >
-                  {formatCurrency(settlement.shortage)}
+                  {formatCurrency(s.amountPending)}
                 </p>
               </div>
             </div>
@@ -666,7 +1142,7 @@ export default function SettlementDetailPage() {
         </Card>
 
         {/* Denominations */}
-        {settlement.denominations && settlement.denominations.length > 0 && (
+        {s.denominations && s.denominations.length > 0 && (
           <Card>
             <CardHeader>
               <CardTitle className="text-base flex items-center gap-2">
@@ -676,7 +1152,7 @@ export default function SettlementDetailPage() {
             </CardHeader>
             <CardContent>
               <div className="space-y-2">
-                {settlement.denominations
+                {s.denominations
                   .filter((d) => d.count > 0)
                   .map((d, idx) => (
                     <div
@@ -687,14 +1163,22 @@ export default function SettlementDetailPage() {
                         <Badge variant="secondary" className="font-mono">
                           {formatCurrency(d.note)}
                         </Badge>
-                        <span className="text-sm text-zinc-500">x {d.count}</span>
+                        <span className="text-sm text-zinc-500">
+                          x {d.count}
+                        </span>
                       </div>
-                      <span className="font-medium">{formatCurrency(d.total)}</span>
+                      <span className="font-medium">
+                        {formatCurrency(d.total)}
+                      </span>
                     </div>
                   ))}
                 <div className="flex items-center justify-between pt-3 border-t border-zinc-200 dark:border-zinc-800">
-                  <span className="text-sm font-medium">Denomination Total</span>
-                  <span className="text-lg font-bold">{formatCurrency(settlement.denominationTotal)}</span>
+                  <span className="text-sm font-medium">
+                    Denomination Total
+                  </span>
+                  <span className="text-lg font-bold">
+                    {formatCurrency(s.denominationTotal)}
+                  </span>
                 </div>
               </div>
             </CardContent>
@@ -702,22 +1186,28 @@ export default function SettlementDetailPage() {
         )}
 
         {/* Notes */}
-        {settlement.notes && (
+        {s.notes && (
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Notes</CardTitle>
             </CardHeader>
             <CardContent>
-              <p className="text-sm text-zinc-600 dark:text-zinc-400">{settlement.notes}</p>
+              <p className="text-sm text-zinc-600 dark:text-zinc-400">
+                {s.notes}
+              </p>
             </CardContent>
           </Card>
         )}
 
         {/* Timestamps */}
         <div className="text-xs text-zinc-400 text-right space-y-1">
-          <p>Created: {new Date(settlement.createdAt).toLocaleString("en-IN")}</p>
-          {settlement.updatedAt !== settlement.createdAt && (
-            <p>Updated: {new Date(settlement.updatedAt).toLocaleString("en-IN")}</p>
+          <p>
+            Created: {new Date(s.createdAt).toLocaleString("en-IN")}
+          </p>
+          {s.updatedAt !== s.createdAt && (
+            <p>
+              Updated: {new Date(s.updatedAt).toLocaleString("en-IN")}
+            </p>
           )}
         </div>
       </motion.div>
@@ -728,26 +1218,39 @@ export default function SettlementDetailPage() {
           <DialogHeader>
             <DialogTitle>Delete Settlement</DialogTitle>
             <DialogDescription>
-              Are you sure you want to delete this settlement? This will reverse the inventory
-              changes (restore full stock and subtract empty stock) and reverse any debt added to{" "}
-              <strong>{settlement.staff.name}</strong>. This action cannot be undone.
+              Are you sure you want to delete this settlement? This will reverse
+              the inventory changes (restore full stock and subtract empty stock)
+              and reverse any debt added to{" "}
+              <strong>{s.staff.name}</strong>. This action cannot be undone.
             </DialogDescription>
           </DialogHeader>
           <div className="rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 p-3 text-sm">
             <p className="font-medium text-red-700 dark:text-red-400">
-              Settlement on {formatDate(settlement.date)}
+              Settlement on {formatDate(s.date)}
             </p>
             <p className="text-red-600 dark:text-red-400 mt-1">
-              Revenue: {formatCurrency(settlement.grossRevenue)} | Shortage:{" "}
-              {formatCurrency(settlement.shortage)}
+              Revenue: {formatCurrency(s.grossRevenue)} | Pending:{" "}
+              {formatCurrency(s.amountPending)}
             </p>
           </div>
           <div className="flex justify-end gap-3 mt-2">
-            <Button variant="outline" onClick={() => setShowDeleteDialog(false)} disabled={deleting}>
+            <Button
+              variant="outline"
+              onClick={() => setShowDeleteDialog(false)}
+              disabled={deleting}
+            >
               Cancel
             </Button>
-            <Button variant="destructive" onClick={handleDelete} disabled={deleting}>
-              {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+            <Button
+              variant="destructive"
+              onClick={handleDelete}
+              disabled={deleting}
+            >
+              {deleting ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Trash2 className="h-4 w-4" />
+              )}
               Delete Settlement
             </Button>
           </div>
