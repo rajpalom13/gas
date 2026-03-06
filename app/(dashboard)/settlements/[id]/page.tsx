@@ -15,6 +15,8 @@ import {
   User,
   Banknote,
   Receipt,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/ui/page-header";
@@ -24,12 +26,13 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+  Table,
+  TableHeader,
+  TableBody,
+  TableRow,
+  TableHead,
+  TableCell,
+} from "@/components/ui/table";
 import {
   Dialog,
   DialogContent,
@@ -38,794 +41,333 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
-import { DenominationEntry } from "@/components/denomination-entry";
-import { TransactionEntry } from "@/components/transaction-entry";
-import { EmptyCylinderEntry } from "@/components/empty-cylinder-entry";
-import { DebtorEntry } from "@/components/debtor-entry";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import { toast } from "@/lib/use-toast";
-import {
-  normalizeSettlement,
-  computeSettlement,
-  computeEmptyReconciliation,
-  type SettlementItemInput,
-} from "@/lib/settlement-utils";
+import { StaffSettlementSection, type StaffEntryData } from "@/components/staff-settlement-section";
 
-interface SettlementItem {
-  cylinderSize: string;
-  quantity: number;
-  pricePerUnit: number;
-  total: number;
-  isNewConnection?: boolean;
-}
-
-interface Transaction {
-  category: string;
-  type: "credit" | "debit";
-  amount: number;
-  note?: string;
-}
-
-interface DebtorData {
-  customer: { _id: string; name: string; phone?: string } | string;
-  type: "cash" | "cylinder";
-  amount?: number;
-  cylinderSize?: string;
-  quantity?: number;
-}
-
-interface Denomination {
-  note: number;
-  count: number;
-  total: number;
+interface StaffEntryDisplay {
+  staff: { _id: string; name: string; phone?: string };
+  items: Array<{ cylinderSize: string; quantity: number; pricePerUnit: number; total: number }>;
+  grossRevenue: number;
+  addOns: Array<{ category: string; amount: number }>;
+  deductions: Array<{ category: string; amount: number; debtorId?: { _id: string; name: string } | string; debtorName?: string }>;
+  totalAddOns: number;
+  totalDeductions: number;
+  amountExpected: number;
+  denominations: Array<{ note: number; count: number; total: number }>;
+  denominationTotal: number;
+  cashDifference: number;
+  staffDebtAdded: number;
+  emptyCylindersReturned: Array<{ cylinderSize: string; quantity: number }>;
+  emptyShortage: Array<{ cylinderSize: string; shortQty: number; debtorId?: { _id: string; name: string } | string; debtorName?: string }>;
+  notes: string;
 }
 
 interface SettlementData {
   _id: string;
-  staff: { _id: string; name: string; phone?: string };
-  customer?: { _id: string; name: string; phone?: string };
   date: string;
-  items: SettlementItem[];
-  grossRevenue: number;
-  // V3 fields
-  transactions: Transaction[];
-  totalCredits: number;
-  totalDebits: number;
-  netRevenue: number;
-  actualCashReceived: number;
-  amountPending: number;
-  emptyCylindersReturned: Array<{ cylinderSize: string; quantity: number }>;
-  debtors: DebtorData[];
-  schemaVersion: number;
-  // Legacy
-  addPayment: number;
-  reducePayment: number;
-  expenses: number;
-  expectedCash: number;
-  actualCash: number;
-  shortage: number;
-  // Common
-  notes: string;
-  denominations: Denomination[];
-  denominationTotal: number;
-  createdAt: string;
-  updatedAt: string;
-}
-
-interface InventoryOption {
-  cylinderSize: string;
-  pricePerUnit: number;
-  fullStock: number;
-}
-
-interface CustomerOption {
-  _id: string;
-  name: string;
-  phone?: string;
-}
-
-interface EditItem {
-  cylinderSize: string;
-  quantity: number;
-  isNewConnection: boolean;
-  priceOverride?: number;
-}
-
-interface EditDebtor {
-  customerId: string;
-  type: "cash" | "cylinder";
-  amount?: number;
-  cylinderSize?: string;
-  quantity?: number;
+  schemaVersion?: number;
+  // V5
+  staffEntries?: StaffEntryDisplay[];
+  totalGrossRevenue?: number;
+  totalAddOns?: number;
+  totalDeductions?: number;
+  totalExpected?: number;
+  totalActualReceived?: number;
+  totalCashDifference?: number;
+  // V3
+  staff?: { _id: string; name: string; phone?: string };
+  grossRevenue?: number;
+  netRevenue?: number;
+  actualCashReceived?: number;
+  amountPending?: number;
+  items?: Array<{ cylinderSize: string; quantity: number; pricePerUnit: number; total: number; isNewConnection?: boolean }>;
+  transactions?: Array<{ category: string; type: string; amount: number; note?: string }>;
+  totalCredits?: number;
+  totalDebits?: number;
+  emptyCylindersReturned?: Array<{ cylinderSize: string; quantity: number }>;
+  debtors?: Array<{ customer: { _id: string; name: string } | string; type: string; amount?: number; cylinderSize?: string; quantity?: number }>;
+  denominations?: Array<{ note: number; count: number; total: number }>;
+  denominationTotal?: number;
+  notes?: string;
+  createdAt?: string;
 }
 
 export default function SettlementDetailPage() {
-  const { id } = useParams<{ id: string }>();
+  const { id } = useParams();
   const router = useRouter();
-
   const [settlement, setSettlement] = useState<SettlementData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [deleting, setDeleting] = useState(false);
-  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
-
-  // Edit mode state
   const [editing, setEditing] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [inventoryList, setInventoryList] = useState<InventoryOption[]>([]);
-  const [customerList, setCustomerList] = useState<CustomerOption[]>([]);
+  const [deleting, setDeleting] = useState(false);
+  const [expandedEntries, setExpandedEntries] = useState<Set<number>>(new Set([0]));
+
+  // Edit state
   const [editDate, setEditDate] = useState("");
-  const [editItems, setEditItems] = useState<EditItem[]>([]);
-  const [editTransactions, setEditTransactions] = useState<Transaction[]>([]);
-  const [editActualCash, setEditActualCash] = useState(0);
-  const [editEmptyCylindersReturned, setEditEmptyCylindersReturned] = useState<
-    Array<{ cylinderSize: string; quantity: number }>
-  >([]);
-  const [editDebtors, setEditDebtors] = useState<EditDebtor[]>([]);
-  const [editNotes, setEditNotes] = useState("");
-  const [editDenominations, setEditDenominations] = useState<Denomination[]>([]);
+  const [editEntries, setEditEntries] = useState<StaffEntryData[]>([]);
+  const [staffList, setStaffList] = useState<Array<{ _id: string; name: string }>>([]);
+  const [inventoryList, setInventoryList] = useState<Array<{ cylinderSize: string; pricePerUnit: number; fullStock: number }>>([]);
+  const [customerList, setCustomerList] = useState<Array<{ _id: string; name: string; phone?: string }>>([]);
+  const [addonCategories, setAddonCategories] = useState<string[]>([]);
+  const [deductionCategories, setDeductionCategories] = useState<string[]>([]);
 
   useEffect(() => {
-    if (!id) return;
-    setLoading(true);
     fetch(`/api/settlements/${id}`)
-      .then((r) => {
-        if (!r.ok) throw new Error("Failed to fetch");
-        return r.json();
-      })
-      .then((data) => {
-        // Normalize legacy settlements to V3 format
-        const normalized = normalizeSettlement(data) as unknown as SettlementData;
-        setSettlement(normalized);
-      })
-      .catch(() => {
-        toast({
-          title: "Error",
-          description: "Settlement not found",
-          variant: "destructive",
-        });
-        router.push("/settlements");
-      })
+      .then((r) => r.json())
+      .then(setSettlement)
       .finally(() => setLoading(false));
-  }, [id, router]);
+  }, [id]);
 
-  const startEditing = () => {
-    if (!settlement) return;
-    // Fetch inventory and customers for edit form
-    Promise.all([
+  const isV5 = settlement?.schemaVersion === 5 && settlement?.staffEntries;
+
+  const startEdit = async () => {
+    // Load reference data
+    const [s, i, c, addonCats, deductCats] = await Promise.all([
+      fetch("/api/staff").then((r) => r.json()),
       fetch("/api/inventory").then((r) => r.json()),
       fetch("/api/customers").then((r) => r.json()),
-    ]).then(([inv, c]) => {
-      setInventoryList(inv);
-      setCustomerList(c.customers || []);
-    });
+      fetch("/api/categories?type=addon").then((r) => r.json()),
+      fetch("/api/categories?type=deduction").then((r) => r.json()),
+    ]);
+    setStaffList(s);
+    setInventoryList(i);
+    setCustomerList(c.customers || []);
+    const addonList = addonCats.categories || addonCats || [];
+    const deductList = deductCats.categories || deductCats || [];
+    setAddonCategories(addonList.map((cat: { name: string }) => cat.name));
+    setDeductionCategories(deductList.map((cat: { name: string }) => cat.name));
 
-    setEditDate(new Date(settlement.date).toISOString().split("T")[0]);
-    setEditItems(
-      settlement.items.map((item) => ({
-        cylinderSize: item.cylinderSize,
-        quantity: item.quantity,
-        isNewConnection: item.isNewConnection || false,
-        priceOverride: undefined,
-      }))
-    );
-    setEditTransactions(settlement.transactions || []);
-    setEditActualCash(settlement.actualCashReceived || settlement.actualCash || 0);
-    setEditEmptyCylindersReturned(settlement.emptyCylindersReturned || []);
-    setEditDebtors(
-      (settlement.debtors || []).map((d) => ({
-        customerId: typeof d.customer === "string" ? d.customer : d.customer._id,
-        type: d.type,
-        amount: d.amount,
-        cylinderSize: d.cylinderSize,
-        quantity: d.quantity,
-      }))
-    );
-    setEditNotes(settlement.notes);
-    setEditDenominations(
-      settlement.denominations.length > 0 ? settlement.denominations : []
-    );
+    if (!settlement) return;
+
+    setEditDate(formatDateInput(settlement.date));
+
+    if (isV5 && settlement.staffEntries) {
+      setEditEntries(
+        settlement.staffEntries.map((e) => ({
+          staffId: typeof e.staff === "object" ? e.staff._id : String(e.staff),
+          items: e.items.map((i) => ({
+            cylinderSize: i.cylinderSize,
+            quantity: i.quantity,
+            priceOverride: i.pricePerUnit,
+          })),
+          addOns: e.addOns.map((a) => ({ category: a.category, amount: a.amount })),
+          deductions: e.deductions.map((d) => ({
+            category: d.category,
+            amount: d.amount,
+            debtorId: typeof d.debtorId === "object" && d.debtorId ? d.debtorId._id : d.debtorId as string | undefined,
+            debtorName: d.debtorName,
+          })),
+          denominations: e.denominations || [],
+          emptyCylindersReturned: e.emptyCylindersReturned || [],
+          emptyShortage: (e.emptyShortage || []).map((s) => ({
+            cylinderSize: s.cylinderSize,
+            shortQty: s.shortQty,
+            debtorId: typeof s.debtorId === "object" && s.debtorId ? s.debtorId._id : s.debtorId as string | undefined,
+            debtorName: s.debtorName,
+          })),
+          addToStaffDebt: e.staffDebtAdded > 0,
+          notes: e.notes || "",
+        }))
+      );
+    } else {
+      // V3 -> convert to edit format
+      setEditEntries([{
+        staffId: settlement.staff?._id || "",
+        items: (settlement.items || []).map((i) => ({
+          cylinderSize: i.cylinderSize,
+          quantity: i.quantity,
+          priceOverride: i.pricePerUnit,
+        })),
+        addOns: (settlement.transactions || [])
+          .filter((t) => t.type === "credit")
+          .map((t) => ({ category: t.category, amount: t.amount })),
+        deductions: (settlement.transactions || [])
+          .filter((t) => t.type === "debit")
+          .map((t) => ({ category: t.category, amount: t.amount })),
+        denominations: settlement.denominations || [],
+        emptyCylindersReturned: settlement.emptyCylindersReturned || [],
+        emptyShortage: [],
+        addToStaffDebt: false,
+        notes: settlement.notes || "",
+      }]);
+    }
+
     setEditing(true);
   };
 
-  const cancelEditing = () => {
-    setEditing(false);
-  };
-
-  const getPrice = (item: EditItem) => {
-    if (item.priceOverride && item.priceOverride > 0) return item.priceOverride;
-    return (
-      inventoryList.find((i) => i.cylinderSize === item.cylinderSize)?.pricePerUnit || 0
-    );
-  };
-
-  const editComputedItems = editItems
-    .filter((i) => i.cylinderSize && i.quantity > 0)
-    .map((item) => {
-      const price = getPrice(item);
-      return {
-        cylinderSize: item.cylinderSize,
-        quantity: item.quantity,
-        pricePerUnit: price,
-        total: item.quantity * price,
-        isNewConnection: item.isNewConnection,
-      };
+  const handleSave = async () => {
+    setSaving(true);
+    const res = await fetch(`/api/settlements/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        date: editDate,
+        staffEntries: editEntries.map((entry) => ({
+          staffId: entry.staffId,
+          items: entry.items.filter((i) => i.cylinderSize && i.quantity > 0).map((i) => ({
+            cylinderSize: i.cylinderSize,
+            quantity: i.quantity,
+            priceOverride: i.priceOverride,
+          })),
+          addOns: entry.addOns.filter((a) => a.category && a.amount > 0),
+          deductions: entry.deductions.filter((d) => d.category && d.amount > 0),
+          denominations: entry.denominations.filter((d) => d.count > 0),
+          emptyCylindersReturned: entry.emptyCylindersReturned.filter((e) => e.quantity > 0),
+          emptyShortage: entry.emptyShortage.filter((s) => s.shortQty > 0),
+          addToStaffDebt: entry.addToStaffDebt,
+          notes: entry.notes,
+        })),
+      }),
     });
 
-  const editSettlement = computeSettlement(
-    editComputedItems,
-    editTransactions,
-    editActualCash
-  );
-
-  const addEditItem = () => {
-    setEditItems([
-      ...editItems,
-      { cylinderSize: "", quantity: 0, isNewConnection: false },
-    ]);
-  };
-
-  const removeEditItem = (index: number) => {
-    setEditItems(editItems.filter((_, i) => i !== index));
-  };
-
-  const updateEditItem = (
-    index: number,
-    field: keyof EditItem,
-    value: string | number | boolean
-  ) => {
-    const newItems = [...editItems];
-    newItems[index] = { ...newItems[index], [field]: value };
-    setEditItems(newItems);
-  };
-
-  const selectedSizes = editItems.map((i) => i.cylinderSize).filter(Boolean);
-
-  const getStockWarning = (item: EditItem) => {
-    if (!item.cylinderSize || item.quantity <= 0) return null;
-    const inv = inventoryList.find((i) => i.cylinderSize === item.cylinderSize);
-    if (!inv) return null;
-    const oldItem = settlement?.items.find(
-      (oi) => oi.cylinderSize === item.cylinderSize
-    );
-    const availableStock = inv.fullStock + (oldItem?.quantity || 0);
-    if (item.quantity > availableStock) {
-      return `Only ${availableStock} available after rollback`;
+    if (res.ok) {
+      const updated = await res.json();
+      setSettlement(updated);
+      setEditing(false);
+      toast({ title: "Settlement updated", variant: "success" });
+    } else {
+      const data = await res.json().catch(() => null);
+      toast({ title: "Error", description: data?.error || "Failed to update", variant: "destructive" });
     }
-    return null;
-  };
-
-  const hasValidItems = editItems.some((i) => i.cylinderSize && i.quantity > 0);
-
-  const handleSave = async () => {
-    if (!hasValidItems) {
-      toast({
-        title: "Validation Error",
-        description: "Add at least one cylinder with quantity greater than 0",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    setSaving(true);
-    try {
-      const res = await fetch(`/api/settlements/${id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          date: editDate,
-          items: editComputedItems.map((item) => ({
-            cylinderSize: item.cylinderSize,
-            quantity: item.quantity,
-            isNewConnection: item.isNewConnection,
-            priceOverride: editItems.find(
-              (i) => i.cylinderSize === item.cylinderSize
-            )?.priceOverride,
-          })),
-          transactions: editTransactions.filter((t) => t.category && t.amount > 0),
-          actualCash: editActualCash,
-          emptyCylindersReturned: editEmptyCylindersReturned.filter(
-            (e) => e.quantity > 0
-          ),
-          debtors: editDebtors
-            .filter((d) => d.customerId)
-            .map((d) => ({
-              customerId: d.customerId,
-              type: d.type,
-              amount: d.amount,
-              cylinderSize: d.cylinderSize,
-              quantity: d.quantity,
-            })),
-          notes: editNotes,
-          denominations: editDenominations.filter((d) => d.count > 0),
-          denominationTotal: editDenominations.reduce((sum, d) => sum + d.total, 0),
-        }),
-      });
-
-      if (res.ok) {
-        const updated = await res.json();
-        const normalized = normalizeSettlement(updated) as unknown as SettlementData;
-        setSettlement(normalized);
-        setEditing(false);
-        toast({
-          title: "Settlement updated",
-          description: "Settlement has been updated with inventory rollback",
-          variant: "success",
-        });
-      } else {
-        const data = await res.json().catch(() => null);
-        toast({
-          title: "Error",
-          description: data?.error || "Failed to update settlement",
-          variant: "destructive",
-        });
-      }
-    } catch {
-      toast({
-        title: "Error",
-        description: "Network error",
-        variant: "destructive",
-      });
-    } finally {
-      setSaving(false);
-    }
+    setSaving(false);
   };
 
   const handleDelete = async () => {
     setDeleting(true);
-    try {
-      const res = await fetch(`/api/settlements/${id}`, { method: "DELETE" });
-      if (res.ok) {
-        toast({
-          title: "Settlement deleted",
-          description: "Settlement has been deleted and inventory rolled back",
-          variant: "success",
-        });
-        router.push("/settlements");
-      } else {
-        const data = await res.json().catch(() => null);
-        toast({
-          title: "Error",
-          description: data?.error || "Failed to delete settlement",
-          variant: "destructive",
-        });
-        setDeleting(false);
-      }
-    } catch {
-      toast({
-        title: "Error",
-        description: "Network error",
-        variant: "destructive",
-      });
+    const res = await fetch(`/api/settlements/${id}`, { method: "DELETE" });
+    if (res.ok) {
+      toast({ title: "Settlement deleted", variant: "success" });
+      router.push("/settlements");
+    } else {
+      toast({ title: "Error", description: "Failed to delete settlement", variant: "destructive" });
       setDeleting(false);
+      setDeleteOpen(false);
     }
-    setShowDeleteDialog(false);
+  };
+
+  const toggleEntry = (idx: number) => {
+    setExpandedEntries((prev) => {
+      const next = new Set(prev);
+      if (next.has(idx)) next.delete(idx);
+      else next.add(idx);
+      return next;
+    });
   };
 
   if (loading) {
     return (
       <div className="space-y-6 max-w-4xl">
-        <div className="flex items-center gap-4">
-          <Skeleton className="h-10 w-10 rounded-lg" />
-          <Skeleton className="h-8 w-48" />
-        </div>
-        <Skeleton className="h-40 rounded-xl" />
-        <Skeleton className="h-60 rounded-xl" />
-        <Skeleton className="h-40 rounded-xl" />
+        <Skeleton className="h-10 w-48" />
+        <Skeleton className="h-64 rounded-xl" />
+        <Skeleton className="h-48 rounded-xl" />
       </div>
     );
   }
 
-  if (!settlement) return null;
+  if (!settlement) {
+    return (
+      <div className="text-center py-12">
+        <p className="text-zinc-500">Settlement not found</p>
+        <Link href="/settlements"><Button variant="outline" className="mt-4">Back</Button></Link>
+      </div>
+    );
+  }
 
-  // Normalized V3 data
-  const s = settlement;
-
-  // --- EDIT MODE ---
+  // Edit mode
   if (editing) {
+    const usedStaffIds = editEntries.map((e) => e.staffId).filter(Boolean);
+
     return (
       <div className="space-y-6 max-w-4xl">
         <div className="flex items-center gap-4">
-          <Button variant="ghost" size="icon" onClick={cancelEditing}>
+          <Button variant="ghost" size="icon" onClick={() => setEditing(false)}>
             <ArrowLeft className="h-4 w-4" />
           </Button>
-          <div>
-            <h1 className="text-2xl font-bold">Edit Settlement</h1>
-            <p className="text-zinc-500 text-sm mt-1">
-              Staff: {settlement.staff.name} -- Editing will rollback and re-apply
-              inventory
-            </p>
-          </div>
+          <h1 className="text-2xl font-bold">Edit Settlement</h1>
         </div>
 
-        <motion.div
-          initial={{ opacity: 0, y: 12 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="space-y-6"
+        <Card>
+          <CardContent className="pt-6">
+            <div className="space-y-2 max-w-xs">
+              <Label>Date</Label>
+              <Input
+                type="date"
+                value={editDate}
+                onChange={(e) => setEditDate(e.target.value)}
+              />
+            </div>
+          </CardContent>
+        </Card>
+
+        {editEntries.map((entry, idx) => (
+          <StaffSettlementSection
+            key={idx}
+            index={idx}
+            data={entry}
+            onChange={(data) => {
+              const updated = [...editEntries];
+              updated[idx] = data;
+              setEditEntries(updated);
+            }}
+            onRemove={() => {
+              if (editEntries.length > 1) {
+                setEditEntries(editEntries.filter((_, i) => i !== idx));
+              }
+            }}
+            staffList={staffList}
+            inventoryList={inventoryList}
+            customerList={customerList}
+            addonCategories={addonCategories}
+            deductionCategories={deductionCategories}
+            usedStaffIds={usedStaffIds}
+          />
+        ))}
+
+        <Button
+          type="button"
+          variant="outline"
+          className="w-full border-dashed border-2"
+          onClick={() =>
+            setEditEntries([...editEntries, {
+              staffId: "", items: [{ cylinderSize: "", quantity: 0 }],
+              addOns: [], deductions: [], denominations: [],
+              emptyCylindersReturned: [], emptyShortage: [],
+              addToStaffDebt: false, notes: "",
+            }])
+          }
         >
-          {/* Date */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Basic Information</CardTitle>
-            </CardHeader>
-            <CardContent className="grid gap-4 sm:grid-cols-2">
-              <div className="space-y-2">
-                <Label>Staff Member</Label>
-                <Input
-                  value={settlement.staff.name}
-                  disabled
-                  className="bg-zinc-50 dark:bg-zinc-900"
-                />
-                <p className="text-xs text-zinc-400">Staff cannot be changed</p>
-              </div>
-              <div className="space-y-2">
-                <Label>Date *</Label>
-                <Input
-                  type="date"
-                  value={editDate}
-                  onChange={(e) => setEditDate(e.target.value)}
-                  required
-                />
-              </div>
-            </CardContent>
-          </Card>
+          <Plus className="h-4 w-4" />
+          Add Delivery Man
+        </Button>
 
-          {/* Cylinder Items */}
-          <Card>
-            <CardHeader>
-              <div className="flex items-center justify-between">
-                <CardTitle className="text-base">Cylinders Delivered</CardTitle>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={addEditItem}
-                >
-                  <Plus className="h-3 w-3" />
-                  Add Cylinder
-                </Button>
-              </div>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              {editItems.map((item, idx) => {
-                const stockWarning = getStockWarning(item);
-                const availableSizes = inventoryList.filter(
-                  (inv) =>
-                    inv.cylinderSize === item.cylinderSize ||
-                    !selectedSizes.includes(inv.cylinderSize)
-                );
-                const price = getPrice(item);
-                return (
-                  <div key={idx} className="space-y-1">
-                    <div className="flex items-end gap-3 flex-wrap">
-                      <div className="flex-1 min-w-[140px] space-y-1">
-                        <Label className="text-xs">Size</Label>
-                        <Select
-                          value={item.cylinderSize}
-                          onValueChange={(v) =>
-                            updateEditItem(idx, "cylinderSize", v)
-                          }
-                        >
-                          <SelectTrigger>
-                            <SelectValue placeholder="Select size" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {availableSizes.map((inv) => (
-                              <SelectItem
-                                key={inv.cylinderSize}
-                                value={inv.cylinderSize}
-                              >
-                                {inv.cylinderSize} —{" "}
-                                {formatCurrency(inv.pricePerUnit)} (Stock:{" "}
-                                {inv.fullStock})
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      <div className="w-20 space-y-1">
-                        <Label className="text-xs">Qty</Label>
-                        <Input
-                          type="number"
-                          min={0}
-                          value={item.quantity || ""}
-                          onChange={(e) =>
-                            updateEditItem(
-                              idx,
-                              "quantity",
-                              parseInt(e.target.value) || 0
-                            )
-                          }
-                        />
-                      </div>
-                      <div className="w-28 space-y-1">
-                        <Label className="text-xs">Price Override</Label>
-                        <Input
-                          type="number"
-                          min={0}
-                          value={item.priceOverride || ""}
-                          onChange={(e) =>
-                            updateEditItem(
-                              idx,
-                              "priceOverride",
-                              parseFloat(e.target.value) || 0
-                            )
-                          }
-                          placeholder="Default"
-                        />
-                      </div>
-                      <div className="space-y-1">
-                        <Label className="text-xs">DBC</Label>
-                        <Button
-                          type="button"
-                          variant={item.isNewConnection ? "default" : "outline"}
-                          size="sm"
-                          className={`w-16 ${
-                            item.isNewConnection
-                              ? "bg-blue-600 hover:bg-blue-700 text-white"
-                              : ""
-                          }`}
-                          onClick={() =>
-                            updateEditItem(
-                              idx,
-                              "isNewConnection",
-                              !item.isNewConnection
-                            )
-                          }
-                        >
-                          {item.isNewConnection ? "Yes" : "No"}
-                        </Button>
-                      </div>
-                      <div className="w-24 text-right">
-                        <p className="text-sm font-medium">
-                          {formatCurrency(item.quantity * price)}
-                        </p>
-                      </div>
-                      {editItems.length > 1 && (
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => removeEditItem(idx)}
-                        >
-                          <Trash2 className="h-4 w-4 text-red-500" />
-                        </Button>
-                      )}
-                    </div>
-                    {stockWarning && (
-                      <p className="text-xs text-amber-600 pl-1">{stockWarning}</p>
-                    )}
-                    {item.isNewConnection && (
-                      <Badge
-                        variant="default"
-                        className="text-[10px] bg-blue-600"
-                      >
-                        New Connection (DBC) - No empty return expected
-                      </Badge>
-                    )}
-                  </div>
-                );
-              })}
-              <div className="text-right pt-2 border-t border-zinc-100 dark:border-zinc-800">
-                <p className="text-sm text-zinc-500">Gross Revenue</p>
-                <p className="text-xl font-bold">
-                  {formatCurrency(editSettlement.grossRevenue)}
-                </p>
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Transactions */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Transactions</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <TransactionEntry
-                transactions={editTransactions}
-                onChange={setEditTransactions}
-              />
-              <div className="pt-4 border-t border-zinc-200 dark:border-zinc-800">
-                <div className="space-y-2">
-                  <Label>Actual Cash Received *</Label>
-                  <Input
-                    type="number"
-                    min={0}
-                    value={editActualCash || ""}
-                    onChange={(e) =>
-                      setEditActualCash(parseFloat(e.target.value) || 0)
-                    }
-                    placeholder="0"
-                  />
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Empty Cylinders Returned */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Empty Cylinders Returned</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <EmptyCylinderEntry
-                items={editItems.filter((i) => i.cylinderSize && i.quantity > 0)}
-                emptyCylindersReturned={editEmptyCylindersReturned}
-                onChange={setEditEmptyCylindersReturned}
-              />
-            </CardContent>
-          </Card>
-
-          {/* Debtor Assignment */}
-          {(editSettlement.amountPending > 0 || editDebtors.length > 0) && (
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">Debtor Assignment</CardTitle>
-              </CardHeader>
-              <CardContent>
-                {editSettlement.amountPending > 0 && (
-                  <div className="rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 p-3 mb-4">
-                    <p className="text-sm text-amber-700 dark:text-amber-400">
-                      Amount pending:{" "}
-                      {formatCurrency(editSettlement.amountPending)}. Assign
-                      debtors below.
-                    </p>
-                  </div>
-                )}
-                <DebtorEntry
-                  debtors={editDebtors}
-                  onChange={setEditDebtors}
-                  customers={customerList}
-                  cylinderSizes={inventoryList.map((i: InventoryOption) => i.cylinderSize)}
-                />
-              </CardContent>
-            </Card>
-          )}
-
-          {/* Denomination Entry */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">
-                Cash Denomination (Optional)
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <DenominationEntry
-                denominations={editDenominations}
-                onChange={setEditDenominations}
-                actualCash={editActualCash}
-              />
-            </CardContent>
-          </Card>
-
-          {/* Notes */}
-          <Card>
-            <CardContent className="pt-6">
-              <div className="space-y-2">
-                <Label>Notes (Optional)</Label>
-                <Input
-                  value={editNotes}
-                  onChange={(e) => setEditNotes(e.target.value)}
-                  placeholder="Any additional notes..."
-                />
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Summary */}
-          <Card className="bg-zinc-50 dark:bg-zinc-900 border-2 relative overflow-hidden">
-            <div className={`absolute inset-x-0 top-0 h-1 bg-gradient-to-r ${sectionThemes.settlements.gradient}`} />
-            <CardHeader>
-              <CardTitle className="text-base flex items-center gap-2">
-                <Calculator className="h-4 w-4" />
-                Settlement Summary
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
-                  <p className="text-xs text-zinc-500">Gross Revenue</p>
-                  <p className="text-lg font-bold text-emerald-600">
-                    {formatCurrency(editSettlement.grossRevenue)}
-                  </p>
-                </div>
-                <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
-                  <p className="text-xs text-zinc-500">+ Credits</p>
-                  <p className="text-lg font-bold text-blue-600">
-                    {formatCurrency(editSettlement.totalCredits)}
-                  </p>
-                </div>
-                <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
-                  <p className="text-xs text-zinc-500">- Debits</p>
-                  <p className="text-lg font-bold text-orange-600">
-                    {formatCurrency(editSettlement.totalDebits)}
-                  </p>
-                </div>
-                <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
-                  <p className="text-xs text-zinc-500">Net Revenue</p>
-                  <p className="text-lg font-bold">
-                    {formatCurrency(editSettlement.netRevenue)}
-                  </p>
-                </div>
-                <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
-                  <p className="text-xs text-zinc-500">Actual Cash</p>
-                  <p className="text-lg font-bold text-blue-600">
-                    {formatCurrency(editActualCash)}
-                  </p>
-                </div>
-                <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
-                  <p className="text-xs text-zinc-500">Amount Pending</p>
-                  <p
-                    className={`text-lg font-bold ${
-                      editSettlement.amountPending > 0
-                        ? "text-red-600"
-                        : "text-emerald-600"
-                    }`}
-                  >
-                    {formatCurrency(editSettlement.amountPending)}
-                  </p>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
-          <div className="flex items-center justify-end gap-3">
-            <Button type="button" variant="outline" onClick={cancelEditing}>
-              Cancel
-            </Button>
-            <Button
-              size="lg"
-              disabled={saving || !hasValidItems}
-              onClick={handleSave}
-            >
-              {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-              Save Changes
-            </Button>
-          </div>
-        </motion.div>
+        <div className="flex items-center justify-end gap-3">
+          <Button variant="outline" onClick={() => setEditing(false)}>Cancel</Button>
+          <Button onClick={handleSave} disabled={saving}>
+            {saving && <Loader2 className="h-4 w-4 animate-spin" />}
+            Save Changes
+          </Button>
+        </div>
       </div>
     );
   }
 
-  // --- VIEW MODE ---
-  // Compute empty cylinder reconciliation for view mode
-  const viewItemInputs: SettlementItemInput[] = s.items.map((item) => ({
-    cylinderSize: item.cylinderSize,
-    quantity: item.quantity,
-    pricePerUnit: item.pricePerUnit,
-    total: item.total,
-    isNewConnection: item.isNewConnection,
-  }));
-  const emptyReconciliation = computeEmptyReconciliation(
-    viewItemInputs,
-    s.emptyCylindersReturned || []
-  );
-  const totalDBC = s.items.filter((i) => i.isNewConnection).reduce((sum, i) => sum + i.quantity, 0);
-
+  // View mode
   return (
     <div className="space-y-6 max-w-4xl">
-      {/* Header */}
-      <div className="flex items-center gap-4 mb-2">
-        <Link href="/settlements">
-          <Button variant="ghost" size="icon">
-            <ArrowLeft className="h-4 w-4" />
-          </Button>
-        </Link>
-      </div>
       <PageHeader
         icon={<Receipt className="h-5 w-5" />}
         title="Settlement Details"
-        subtitle={`${formatDate(s.date)} -- ${s.staff.name}`}
+        subtitle={formatDate(settlement.date)}
         gradient={sectionThemes.settlements.gradient}
         actions={
           <div className="flex gap-2">
-            <Button variant="outline" onClick={startEditing}>
+            <Button variant="outline" onClick={startEdit}>
               <Pencil className="h-4 w-4" />
               Edit
             </Button>
-            <Button
-              variant="destructive"
-              onClick={() => setShowDeleteDialog(true)}
-            >
+            <Button variant="destructive" onClick={() => setDeleteOpen(true)}>
               <Trash2 className="h-4 w-4" />
               Delete
             </Button>
@@ -833,431 +375,273 @@ export default function SettlementDetailPage() {
         }
       />
 
-      <motion.div
-        initial={{ opacity: 0, y: 12 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="space-y-6"
-      >
-        {/* Basic Info */}
-        <Card className="relative overflow-hidden">
-          <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-blue-500 to-blue-400" />
-          <CardHeader>
-            <CardTitle className="text-base">Basic Information</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              <div className="flex items-center gap-3">
-                <div className="p-2 rounded-lg bg-blue-50 dark:bg-blue-900/20">
-                  <User className="h-4 w-4 text-blue-600" />
-                </div>
-                <div>
-                  <p className="text-xs text-zinc-500">Staff</p>
-                  <p className="font-medium">{s.staff.name}</p>
-                </div>
-              </div>
-              <div className="flex items-center gap-3">
-                <div className="p-2 rounded-lg bg-purple-50 dark:bg-purple-900/20">
-                  <Calendar className="h-4 w-4 text-purple-600" />
-                </div>
-                <div>
-                  <p className="text-xs text-zinc-500">Date</p>
-                  <p className="font-medium">{formatDate(s.date)}</p>
-                </div>
-              </div>
-              {s.customer && (
-                <div className="flex items-center gap-3">
-                  <div className="p-2 rounded-lg bg-emerald-50 dark:bg-emerald-900/20">
-                    <User className="h-4 w-4 text-emerald-600" />
-                  </div>
-                  <div>
-                    <p className="text-xs text-zinc-500">Customer</p>
-                    <p className="font-medium">{s.customer.name}</p>
-                  </div>
-                </div>
-              )}
-            </div>
-          </CardContent>
-        </Card>
+      <Link href="/settlements">
+        <Button variant="ghost" size="sm">
+          <ArrowLeft className="h-4 w-4" />
+          Back to Settlements
+        </Button>
+      </Link>
 
-        {/* Cylinders */}
-        <Card className="relative overflow-hidden">
-          <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-indigo-500 to-indigo-400" />
-          <CardHeader>
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-base">Cylinders Delivered</CardTitle>
-              {totalDBC > 0 && (
-                <Badge variant="default" className="bg-blue-600">
-                  {totalDBC} DBC
-                </Badge>
-              )}
-            </div>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-2">
-              {s.items.map((item, idx) => (
-                <div
-                  key={idx}
-                  className="flex items-center justify-between p-3 rounded-lg bg-zinc-50 dark:bg-zinc-900"
-                >
+      {/* V5 Display */}
+      {isV5 && settlement.staffEntries ? (
+        <>
+          {settlement.staffEntries.map((entry, idx) => (
+            <Card key={idx} className="overflow-hidden">
+              <CardHeader
+                className="cursor-pointer bg-gradient-to-r from-blue-50 to-blue-100 dark:from-blue-950/30 dark:to-blue-900/20 border-b"
+                onClick={() => toggleEntry(idx)}
+              >
+                <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
-                    <Badge variant="secondary">{item.cylinderSize}</Badge>
-                    <span className="text-sm text-zinc-500">
-                      {item.quantity} x {formatCurrency(item.pricePerUnit)}
-                    </span>
-                    {item.isNewConnection && (
-                      <Badge
-                        variant="default"
-                        className="text-[10px] bg-blue-600"
-                      >
-                        DBC
-                      </Badge>
-                    )}
+                    {expandedEntries.has(idx) ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                    <User className="h-4 w-4 text-blue-600" />
+                    <span className="font-semibold">{entry.staff?.name || "Unknown"}</span>
+                    <Badge variant="secondary" className="text-xs">
+                      {entry.items.reduce((s, i) => s + i.quantity, 0)} cylinders
+                    </Badge>
                   </div>
-                  <span className="font-semibold">
-                    {formatCurrency(item.total)}
-                  </span>
-                </div>
-              ))}
-              <div className="flex items-center justify-between pt-3 border-t border-zinc-200 dark:border-zinc-800">
-                <span className="text-sm text-zinc-500">Gross Revenue</span>
-                <span className="text-xl font-bold text-emerald-600">
-                  {formatCurrency(s.grossRevenue)}
-                </span>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Transactions */}
-        {s.transactions && s.transactions.length > 0 && (
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Transactions</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-2">
-                {s.transactions.map((txn, idx) => (
-                  <div
-                    key={idx}
-                    className="flex items-center justify-between p-3 rounded-lg bg-zinc-50 dark:bg-zinc-900"
-                  >
-                    <div className="flex items-center gap-2">
-                      <Badge
-                        variant={
-                          txn.type === "credit" ? "success" : "destructive"
-                        }
-                        className="text-[10px]"
-                      >
-                        {txn.type}
-                      </Badge>
-                      <Badge variant="secondary" className="text-[10px]">
-                        {txn.category}
-                      </Badge>
-                      {txn.note && (
-                        <span className="text-xs text-zinc-400">
-                          {txn.note}
-                        </span>
-                      )}
-                    </div>
-                    <span
-                      className={`font-semibold ${
-                        txn.type === "credit"
-                          ? "text-emerald-600"
-                          : "text-red-600"
-                      }`}
+                  <div className="flex items-center gap-3">
+                    <Badge variant="outline" className="font-mono">
+                      Expected: {formatCurrency(entry.amountExpected)}
+                    </Badge>
+                    <Badge
+                      variant={entry.cashDifference > 0 ? "destructive" : "success"}
+                      className="font-mono"
                     >
-                      {txn.type === "credit" ? "+" : "-"}
-                      {formatCurrency(txn.amount)}
-                    </span>
-                  </div>
-                ))}
-                <div className="flex items-center justify-between pt-3 border-t border-zinc-200 dark:border-zinc-800 flex-wrap gap-2">
-                  <div className="flex gap-3">
-                    <span className="text-xs text-zinc-500">
-                      Credits:{" "}
-                      <span className="font-medium text-emerald-600">
-                        {formatCurrency(s.totalCredits)}
-                      </span>
-                    </span>
-                    <span className="text-xs text-zinc-500">
-                      Debits:{" "}
-                      <span className="font-medium text-red-600">
-                        {formatCurrency(s.totalDebits)}
-                      </span>
-                    </span>
+                      Received: {formatCurrency(entry.denominationTotal)}
+                    </Badge>
                   </div>
                 </div>
-              </div>
-            </CardContent>
-          </Card>
-        )}
+              </CardHeader>
 
-        {/* Empty Cylinder Reconciliation */}
-        {emptyReconciliation.length > 0 && (
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">
-                Empty Cylinder Reconciliation
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-2">
-                {emptyReconciliation.map((row) => (
-                  <div
-                    key={row.cylinderSize}
-                    className={`flex items-center justify-between p-3 rounded-lg ${
-                      row.mismatch !== 0
-                        ? "bg-amber-50 dark:bg-amber-900/10 border border-amber-200 dark:border-amber-800"
-                        : "bg-zinc-50 dark:bg-zinc-900"
-                    }`}
-                  >
-                    <div className="flex items-center gap-3">
-                      <Badge variant="secondary">{row.cylinderSize}</Badge>
-                      <span className="text-sm text-zinc-500">
-                        Issued: {row.issued}
-                        {row.newConnections > 0 && (
-                          <span className="text-blue-600">
-                            {" "}
-                            (DBC: {row.newConnections})
-                          </span>
-                        )}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-3">
-                      <span className="text-sm text-zinc-500">
-                        Expected: {row.expected}
-                      </span>
-                      <span className="text-sm font-medium">
-                        Returned: {row.returned}
-                      </span>
-                      {row.mismatch !== 0 && (
-                        <Badge variant="warning" className="text-[10px]">
-                          {row.mismatch > 0
-                            ? `${row.mismatch} short`
-                            : `${Math.abs(row.mismatch)} extra`}
+              {expandedEntries.has(idx) && (
+                <CardContent className="p-4 space-y-4">
+                  {/* Cylinders */}
+                  <div>
+                    <p className="text-sm font-medium text-zinc-500 mb-2">Cylinders Delivered</p>
+                    <div className="flex gap-2 flex-wrap">
+                      {entry.items.map((item, i) => (
+                        <Badge key={i} variant="secondary">
+                          {item.quantity}x {item.cylinderSize} @ {formatCurrency(item.pricePerUnit)} = {formatCurrency(item.total)}
                         </Badge>
-                      )}
-                      {row.mismatch === 0 && row.expected > 0 && (
-                        <Badge variant="success" className="text-[10px]">
-                          OK
-                        </Badge>
-                      )}
+                      ))}
                     </div>
+                    <p className="text-sm mt-2">Gross Revenue: <span className="font-bold text-emerald-600">{formatCurrency(entry.grossRevenue)}</span></p>
                   </div>
-                ))}
-              </div>
-            </CardContent>
-          </Card>
-        )}
 
-        {/* Debtors */}
-        {s.debtors && s.debtors.length > 0 && (
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Debtors</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-2">
-                {s.debtors.map((debtor, idx) => {
-                  const customerName =
-                    typeof debtor.customer === "string"
-                      ? debtor.customer
-                      : debtor.customer?.name || "Unknown";
-                  return (
-                    <div
-                      key={idx}
-                      className="flex items-center justify-between p-3 rounded-lg bg-zinc-50 dark:bg-zinc-900"
-                    >
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium text-sm">
-                          {customerName}
-                        </span>
-                        <Badge
-                          variant={
-                            debtor.type === "cash" ? "warning" : "secondary"
-                          }
-                          className="text-[10px]"
-                        >
-                          {debtor.type}
-                        </Badge>
+                  {/* Add Ons */}
+                  {entry.addOns.length > 0 && (
+                    <div>
+                      <p className="text-sm font-medium text-emerald-600 mb-1">Add Ons ({formatCurrency(entry.totalAddOns)})</p>
+                      <div className="flex gap-2 flex-wrap">
+                        {entry.addOns.map((a, i) => (
+                          <Badge key={i} variant="success" className="text-xs">
+                            {a.category}: {formatCurrency(a.amount)}
+                          </Badge>
+                        ))}
                       </div>
-                      <span className="text-sm font-semibold">
-                        {debtor.type === "cash"
-                          ? formatCurrency(debtor.amount || 0)
-                          : `${debtor.quantity}x ${debtor.cylinderSize}`}
-                      </span>
                     </div>
-                  );
-                })}
-              </div>
-            </CardContent>
-          </Card>
-        )}
+                  )}
 
-        {/* Financial Summary */}
-        <Card className="bg-zinc-50 dark:bg-zinc-900 border-2">
-          <CardHeader>
-            <CardTitle className="text-base flex items-center gap-2">
-              <Calculator className="h-4 w-4" />
-              Financial Summary
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
-                <p className="text-xs text-zinc-500">Gross Revenue</p>
-                <p className="text-lg font-bold text-emerald-600">
-                  {formatCurrency(s.grossRevenue)}
-                </p>
-              </div>
-              <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
-                <p className="text-xs text-zinc-500">+ Credits</p>
-                <p className="text-lg font-bold text-blue-600">
-                  {formatCurrency(s.totalCredits)}
-                </p>
-              </div>
-              <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
-                <p className="text-xs text-zinc-500">- Debits</p>
-                <p className="text-lg font-bold text-orange-600">
-                  {formatCurrency(s.totalDebits)}
-                </p>
-              </div>
-              <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
-                <p className="text-xs text-zinc-500">Net Revenue</p>
-                <p className="text-lg font-bold">
-                  {formatCurrency(s.netRevenue)}
-                </p>
-              </div>
-              <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
-                <p className="text-xs text-zinc-500">Actual Cash</p>
-                <p className="text-lg font-bold text-blue-600">
-                  {formatCurrency(s.actualCashReceived)}
-                </p>
-              </div>
-              <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
-                <p className="text-xs text-zinc-500">Amount Pending</p>
-                <p
-                  className={`text-lg font-bold ${
-                    s.amountPending > 0 ? "text-red-600" : "text-emerald-600"
-                  }`}
-                >
-                  {formatCurrency(s.amountPending)}
-                </p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
+                  {/* Deductions */}
+                  {entry.deductions.length > 0 && (
+                    <div>
+                      <p className="text-sm font-medium text-red-600 mb-1">Deductions ({formatCurrency(entry.totalDeductions)})</p>
+                      <div className="flex gap-2 flex-wrap">
+                        {entry.deductions.map((d, i) => {
+                          const debtorName = typeof d.debtorId === "object" && d.debtorId
+                            ? d.debtorId.name
+                            : d.debtorName;
+                          return (
+                            <Badge key={i} variant="destructive" className="text-xs">
+                              {d.category}: {formatCurrency(d.amount)}
+                              {debtorName ? ` (${debtorName})` : ""}
+                            </Badge>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
 
-        {/* Denominations */}
-        {s.denominations && s.denominations.length > 0 && (
-          <Card>
+                  {/* Formula */}
+                  <div className="p-3 bg-zinc-50 dark:bg-zinc-900 rounded-lg text-sm text-center">
+                    {formatCurrency(entry.grossRevenue)} + {formatCurrency(entry.totalAddOns)} - {formatCurrency(entry.totalDeductions)} = <span className="font-bold">{formatCurrency(entry.amountExpected)}</span>
+                  </div>
+
+                  {/* Cash Details */}
+                  <div className="grid gap-2 sm:grid-cols-3">
+                    <div className="p-3 rounded-lg bg-zinc-50 dark:bg-zinc-900">
+                      <p className="text-xs text-zinc-500">Amount Expected</p>
+                      <p className="text-lg font-bold">{formatCurrency(entry.amountExpected)}</p>
+                    </div>
+                    <div className="p-3 rounded-lg bg-emerald-50 dark:bg-emerald-950/20">
+                      <p className="text-xs text-zinc-500">Amount Received</p>
+                      <p className="text-lg font-bold text-emerald-600">{formatCurrency(entry.denominationTotal)}</p>
+                    </div>
+                    <div className={`p-3 rounded-lg ${entry.cashDifference > 0 ? "bg-red-50 dark:bg-red-950/20" : "bg-zinc-50 dark:bg-zinc-900"}`}>
+                      <p className="text-xs text-zinc-500">Difference</p>
+                      <p className={`text-lg font-bold ${entry.cashDifference > 0 ? "text-red-600" : "text-emerald-600"}`}>
+                        {formatCurrency(entry.cashDifference)}
+                      </p>
+                      {entry.staffDebtAdded > 0 && (
+                        <p className="text-xs text-amber-600">Added to staff debt</p>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Denominations */}
+                  {entry.denominations?.length > 0 && entry.denominations.some(d => d.count > 0) && (
+                    <div>
+                      <p className="text-sm font-medium text-zinc-500 mb-1">Cash Denomination</p>
+                      <div className="flex gap-2 flex-wrap">
+                        {entry.denominations.filter(d => d.count > 0).map((d, i) => (
+                          <Badge key={i} variant="outline" className="text-xs font-mono">
+                            {formatCurrency(d.note)} x {d.count} = {formatCurrency(d.total)}
+                          </Badge>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Empty Cylinders */}
+                  {entry.emptyCylindersReturned?.length > 0 && (
+                    <div>
+                      <p className="text-sm font-medium text-zinc-500 mb-1">Empty Cylinders Returned</p>
+                      <div className="flex gap-2 flex-wrap">
+                        {entry.emptyCylindersReturned.map((e, i) => (
+                          <Badge key={i} variant="warning" className="text-xs">
+                            {e.quantity}x {e.cylinderSize}
+                          </Badge>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Notes */}
+                  {entry.notes && (
+                    <p className="text-sm text-zinc-500 italic">Note: {entry.notes}</p>
+                  )}
+                </CardContent>
+              )}
+            </Card>
+          ))}
+
+          {/* Consolidated Summary */}
+          <Card className="bg-zinc-50 dark:bg-zinc-900 border-2 relative overflow-hidden">
+            <div className={`absolute inset-x-0 top-0 h-1 bg-gradient-to-r ${sectionThemes.settlements.gradient}`} />
             <CardHeader>
               <CardTitle className="text-base flex items-center gap-2">
-                <Banknote className="h-4 w-4" />
-                Cash Denomination
+                <Calculator className="h-4 w-4" />
+                Consolidated Summary
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="space-y-2">
-                {s.denominations
-                  .filter((d) => d.count > 0)
-                  .map((d, idx) => (
-                    <div
-                      key={idx}
-                      className="flex items-center justify-between p-2 rounded-lg bg-zinc-50 dark:bg-zinc-900"
-                    >
-                      <div className="flex items-center gap-3">
-                        <Badge variant="secondary" className="font-mono">
-                          {formatCurrency(d.note)}
-                        </Badge>
-                        <span className="text-sm text-zinc-500">
-                          x {d.count}
-                        </span>
-                      </div>
-                      <span className="font-medium">
-                        {formatCurrency(d.total)}
-                      </span>
-                    </div>
-                  ))}
-                <div className="flex items-center justify-between pt-3 border-t border-zinc-200 dark:border-zinc-800">
-                  <span className="text-sm font-medium">
-                    Denomination Total
-                  </span>
-                  <span className="text-lg font-bold">
-                    {formatCurrency(s.denominationTotal)}
-                  </span>
+              <div className="grid gap-3 sm:grid-cols-3">
+                <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
+                  <p className="text-xs text-zinc-500">Total Expected</p>
+                  <p className="text-lg font-bold">{formatCurrency(settlement.totalExpected || 0)}</p>
+                </div>
+                <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
+                  <p className="text-xs text-zinc-500">Total Received</p>
+                  <p className="text-lg font-bold text-emerald-600">{formatCurrency(settlement.totalActualReceived || 0)}</p>
+                </div>
+                <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
+                  <p className="text-xs text-zinc-500">Total Difference</p>
+                  <p className={`text-lg font-bold ${(settlement.totalCashDifference || 0) > 0 ? "text-red-600" : "text-emerald-600"}`}>
+                    {formatCurrency(settlement.totalCashDifference || 0)}
+                  </p>
                 </div>
               </div>
             </CardContent>
           </Card>
-        )}
+        </>
+      ) : (
+        /* V3 Display */
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base flex items-center gap-2">
+              <User className="h-4 w-4" />
+              {settlement.staff?.name || "Unknown"}
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {/* Items */}
+            <div>
+              <p className="text-sm font-medium text-zinc-500 mb-2">Cylinders</p>
+              <div className="flex gap-2 flex-wrap">
+                {(settlement.items || []).map((item, i) => (
+                  <Badge key={i} variant="secondary">
+                    {item.quantity}x {item.cylinderSize} = {formatCurrency(item.total)}
+                    {item.isNewConnection ? " (DBC)" : ""}
+                  </Badge>
+                ))}
+              </div>
+            </div>
 
-        {/* Notes */}
-        {s.notes && (
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Notes</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <p className="text-sm text-zinc-600 dark:text-zinc-400">
-                {s.notes}
-              </p>
-            </CardContent>
-          </Card>
-        )}
+            {/* Transactions */}
+            {settlement.transactions && settlement.transactions.length > 0 && (
+              <div>
+                <p className="text-sm font-medium text-zinc-500 mb-1">Transactions</p>
+                <div className="flex gap-2 flex-wrap">
+                  {settlement.transactions.map((t, i) => (
+                    <Badge key={i} variant={t.type === "credit" ? "success" : "destructive"} className="text-xs">
+                      {t.category}: {formatCurrency(t.amount)} ({t.type})
+                    </Badge>
+                  ))}
+                </div>
+              </div>
+            )}
 
-        {/* Timestamps */}
-        <div className="text-xs text-zinc-400 text-right space-y-1">
-          <p>
-            Created: {new Date(s.createdAt).toLocaleString("en-IN")}
-          </p>
-          {s.updatedAt !== s.createdAt && (
-            <p>
-              Updated: {new Date(s.updatedAt).toLocaleString("en-IN")}
-            </p>
-          )}
-        </div>
-      </motion.div>
+            {/* Summary */}
+            <div className="grid gap-3 sm:grid-cols-3">
+              <div className="p-3 rounded-lg bg-zinc-50 dark:bg-zinc-900">
+                <p className="text-xs text-zinc-500">Net Revenue</p>
+                <p className="text-lg font-bold">{formatCurrency(settlement.netRevenue || 0)}</p>
+              </div>
+              <div className="p-3 rounded-lg bg-zinc-50 dark:bg-zinc-900">
+                <p className="text-xs text-zinc-500">Actual Cash</p>
+                <p className="text-lg font-bold text-blue-600">{formatCurrency(settlement.actualCashReceived || 0)}</p>
+              </div>
+              <div className="p-3 rounded-lg bg-zinc-50 dark:bg-zinc-900">
+                <p className="text-xs text-zinc-500">Amount Pending</p>
+                <p className={`text-lg font-bold ${(settlement.amountPending || 0) > 0 ? "text-red-600" : "text-emerald-600"}`}>
+                  {formatCurrency(settlement.amountPending || 0)}
+                </p>
+              </div>
+            </div>
 
-      {/* Delete Confirmation Dialog */}
-      <Dialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
+            {/* Empty Cylinders */}
+            {settlement.emptyCylindersReturned && settlement.emptyCylindersReturned.length > 0 && (
+              <div>
+                <p className="text-sm font-medium text-zinc-500 mb-1">Empty Cylinders Returned</p>
+                <div className="flex gap-2 flex-wrap">
+                  {settlement.emptyCylindersReturned.map((e, i) => (
+                    <Badge key={i} variant="warning" className="text-xs">
+                      {e.quantity}x {e.cylinderSize}
+                    </Badge>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {settlement.notes && <p className="text-sm text-zinc-500 italic">Note: {settlement.notes}</p>}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Delete Confirmation */}
+      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Delete Settlement</DialogTitle>
             <DialogDescription>
-              Are you sure you want to delete this settlement? This will reverse
-              the inventory changes (restore full stock and subtract empty stock)
-              and reverse any debt added to{" "}
-              <strong>{s.staff.name}</strong>. This action cannot be undone.
+              This will reverse all inventory changes, staff debts, and customer debts associated with this settlement. This action cannot be undone.
             </DialogDescription>
           </DialogHeader>
-          <div className="rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 p-3 text-sm">
-            <p className="font-medium text-red-700 dark:text-red-400">
-              Settlement on {formatDate(s.date)}
-            </p>
-            <p className="text-red-600 dark:text-red-400 mt-1">
-              Revenue: {formatCurrency(s.grossRevenue)} | Pending:{" "}
-              {formatCurrency(s.amountPending)}
-            </p>
-          </div>
-          <div className="flex justify-end gap-3 mt-2">
-            <Button
-              variant="outline"
-              onClick={() => setShowDeleteDialog(false)}
-              disabled={deleting}
-            >
-              Cancel
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={handleDelete}
-              disabled={deleting}
-            >
-              {deleting ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Trash2 className="h-4 w-4" />
-              )}
+          <div className="flex justify-end gap-3 mt-4">
+            <Button variant="outline" onClick={() => setDeleteOpen(false)}>Cancel</Button>
+            <Button variant="destructive" onClick={handleDelete} disabled={deleting}>
+              {deleting && <Loader2 className="h-4 w-4 animate-spin" />}
               Delete Settlement
             </Button>
           </div>
@@ -1265,4 +649,9 @@ export default function SettlementDetailPage() {
       </Dialog>
     </div>
   );
+}
+
+function formatDateInput(dateStr: string): string {
+  const d = new Date(dateStr);
+  return d.toISOString().split("T")[0];
 }

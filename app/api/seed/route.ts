@@ -3,6 +3,7 @@ import bcryptjs from "bcryptjs";
 import { connectDB } from "@/lib/db";
 import { User } from "@/lib/models/User";
 import { Inventory } from "@/lib/models/Inventory";
+import { Category } from "@/lib/models/Category";
 import { requireAdmin } from "@/lib/auth";
 
 export async function GET() {
@@ -48,6 +49,25 @@ export async function GET() {
       await Inventory.findOneAndUpdate(
         { cylinderSize: item.cylinderSize },
         { $setOnInsert: item },
+        { upsert: true, new: true }
+      );
+    }
+
+    // Seed default categories
+    const defaultCategories = [
+      { name: "Paytm", type: "addon" as const },
+      { name: "Cash", type: "addon" as const },
+      { name: "UPI", type: "addon" as const },
+      { name: "PhonePe", type: "addon" as const },
+      { name: "Fuel", type: "deduction" as const },
+      { name: "Discount", type: "deduction" as const },
+      { name: "Return", type: "deduction" as const },
+    ];
+
+    for (const cat of defaultCategories) {
+      await Category.findOneAndUpdate(
+        { name: cat.name, type: cat.type },
+        { $setOnInsert: cat },
         { upsert: true, new: true }
       );
     }

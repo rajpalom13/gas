@@ -1,6 +1,7 @@
 import mongoose, { Schema, Document, Model, Types } from "mongoose";
 
-// V3 interfaces
+// ─── V3 interfaces (kept for backward compat) ───
+
 export interface ITransaction {
   category: string;
   type: "credit" | "debit";
@@ -26,7 +27,7 @@ export interface ISettlementItem {
   quantity: number;
   pricePerUnit: number;
   total: number;
-  isNewConnection: boolean;
+  isNewConnection?: boolean;
 }
 
 export interface IDenomination {
@@ -65,7 +66,71 @@ export interface ISettlement extends Document {
   createdBy: Types.ObjectId;
   createdAt: Date;
   updatedAt: Date;
+  // V5 fields
+  staffEntries?: IStaffEntry[];
+  totalGrossRevenue?: number;
+  totalAddOns?: number;
+  totalDeductions?: number;
+  totalExpected?: number;
+  totalActualReceived?: number;
+  totalCashDifference?: number;
 }
+
+// ─── V5 interfaces ───
+
+export interface IAddOn {
+  category: string;
+  amount: number;
+}
+
+export interface IDeduction {
+  category: string;
+  amount: number;
+  debtorId?: Types.ObjectId;
+  debtorName?: string;
+}
+
+export interface IEmptyShortage {
+  cylinderSize: string;
+  shortQty: number;
+  debtorId?: Types.ObjectId;
+  debtorName?: string;
+}
+
+export interface IStaffEntry {
+  staff: Types.ObjectId;
+  items: ISettlementItem[];
+  grossRevenue: number;
+  addOns: IAddOn[];
+  deductions: IDeduction[];
+  totalAddOns: number;
+  totalDeductions: number;
+  amountExpected: number;
+  denominations: IDenomination[];
+  denominationTotal: number;
+  cashDifference: number;
+  staffDebtAdded: number;
+  emptyCylindersReturned: IEmptyCylinderReturn[];
+  emptyShortage: IEmptyShortage[];
+  notes: string;
+}
+
+export interface ISettlementV5 extends Document {
+  date: Date;
+  staffEntries: IStaffEntry[];
+  totalGrossRevenue: number;
+  totalAddOns: number;
+  totalDeductions: number;
+  totalExpected: number;
+  totalActualReceived: number;
+  totalCashDifference: number;
+  schemaVersion: number;
+  createdBy: Types.ObjectId;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// ─── V3 Sub-schemas ───
 
 const TransactionSchema = new Schema<ITransaction>(
   {
@@ -107,14 +172,76 @@ const SettlementItemSchema = new Schema<ISettlementItem>(
   { _id: false }
 );
 
-const SettlementSchema = new Schema<ISettlement>(
+// ─── V5 Sub-schemas ───
+
+const AddOnSchema = new Schema<IAddOn>(
+  {
+    category: { type: String, required: true },
+    amount: { type: Number, required: true },
+  },
+  { _id: false }
+);
+
+const DeductionSchema = new Schema<IDeduction>(
+  {
+    category: { type: String, required: true },
+    amount: { type: Number, required: true },
+    debtorId: { type: Schema.Types.ObjectId, ref: "Customer" },
+    debtorName: { type: String },
+  },
+  { _id: false }
+);
+
+const EmptyShortageSchema = new Schema<IEmptyShortage>(
+  {
+    cylinderSize: { type: String, required: true },
+    shortQty: { type: Number, required: true, min: 0 },
+    debtorId: { type: Schema.Types.ObjectId, ref: "Customer" },
+    debtorName: { type: String },
+  },
+  { _id: false }
+);
+
+const DenominationSchema = new Schema<IDenomination>(
+  {
+    note: { type: Number, required: true },
+    count: { type: Number, required: true },
+    total: { type: Number, required: true },
+  },
+  { _id: false }
+);
+
+const StaffEntrySchema = new Schema<IStaffEntry>(
   {
     staff: { type: Schema.Types.ObjectId, ref: "Staff", required: true },
+    items: [SettlementItemSchema],
+    grossRevenue: { type: Number, default: 0 },
+    addOns: { type: [AddOnSchema], default: [] },
+    deductions: { type: [DeductionSchema], default: [] },
+    totalAddOns: { type: Number, default: 0 },
+    totalDeductions: { type: Number, default: 0 },
+    amountExpected: { type: Number, default: 0 },
+    denominations: [DenominationSchema],
+    denominationTotal: { type: Number, default: 0 },
+    cashDifference: { type: Number, default: 0 },
+    staffDebtAdded: { type: Number, default: 0 },
+    emptyCylindersReturned: { type: [EmptyCylinderReturnSchema], default: [] },
+    emptyShortage: { type: [EmptyShortageSchema], default: [] },
+    notes: { type: String, default: "" },
+  },
+  { _id: false }
+);
+
+// ─── Main Schema (supports both V3 and V5) ───
+
+const SettlementSchema = new Schema<ISettlement>(
+  {
+    // V3 flat fields
+    staff: { type: Schema.Types.ObjectId, ref: "Staff" },
     customer: { type: Schema.Types.ObjectId, ref: "Customer" },
     date: { type: Date, required: true },
     items: [SettlementItemSchema],
     grossRevenue: { type: Number, default: 0 },
-    // V3 fields
     transactions: { type: [TransactionSchema], default: [] },
     totalCredits: { type: Number, default: 0 },
     totalDebits: { type: Number, default: 0 },
@@ -133,13 +260,17 @@ const SettlementSchema = new Schema<ISettlement>(
     shortage: { type: Number, default: 0 },
     // Common
     notes: { type: String, default: "" },
-    denominations: [{
-      note: { type: Number, required: true },
-      count: { type: Number, required: true },
-      total: { type: Number, required: true },
-    }],
+    denominations: [DenominationSchema],
     denominationTotal: { type: Number, default: 0 },
     createdBy: { type: Schema.Types.ObjectId, ref: "User" },
+    // V5 fields
+    staffEntries: { type: [StaffEntrySchema], default: undefined },
+    totalGrossRevenue: { type: Number },
+    totalAddOns: { type: Number },
+    totalDeductions: { type: Number },
+    totalExpected: { type: Number },
+    totalActualReceived: { type: Number },
+    totalCashDifference: { type: Number },
   },
   { timestamps: true }
 );
@@ -149,7 +280,3 @@ SettlementSchema.index({ date: -1 });
 
 export const Settlement: Model<ISettlement> =
   mongoose.models.Settlement || mongoose.model<ISettlement>("Settlement", SettlementSchema);
-
-// Transaction category enums
-export const CREDIT_CATEGORIES = ["Paytm", "Cash", "UPI", "PhonePe", "Other"] as const;
-export const DEBIT_CATEGORIES = ["Fuel", "Discount", "Return", "Maintenance", "Other"] as const;

@@ -23,7 +23,6 @@ interface EmptyCylindersData {
   reconciliation: Array<{
     cylinderSize: string;
     issued: number;
-    newConnections: number;
     expected: number;
     returned: number;
     mismatch: number;
@@ -33,7 +32,7 @@ interface EmptyCylindersData {
     staffName: string;
     date: string;
     emptyCylindersReturned: Array<{ cylinderSize: string; quantity: number }>;
-    items: Array<{ cylinderSize: string; quantity: number; isNewConnection?: boolean }>;
+    items: Array<{ cylinderSize: string; quantity: number }>;
   }>;
   weeklyTrend: Array<{
     date: string;
@@ -208,19 +207,15 @@ export default function EmptyCylindersPage() {
                           <p className="font-semibold">{item.issued}</p>
                         </div>
                         <div>
-                          <p className="text-xs text-zinc-500">DBC</p>
-                          <p className="font-semibold">{item.newConnections}</p>
-                        </div>
-                        <div>
                           <p className="text-xs text-zinc-500">Expected</p>
                           <p className="font-semibold">{item.expected}</p>
                         </div>
-                      </div>
-                      <div className="grid grid-cols-2 gap-2 text-center text-sm mt-2">
                         <div>
                           <p className="text-xs text-zinc-500">Returned</p>
                           <p className="font-semibold">{item.returned}</p>
                         </div>
+                      </div>
+                      <div className="flex justify-center text-sm mt-2">
                         <div>
                           <p className="text-xs text-zinc-500">Mismatch</p>
                           <Badge variant={item.mismatch !== 0 ? "destructive" : "success"} className="text-sm font-bold">
@@ -239,7 +234,6 @@ export default function EmptyCylindersPage() {
                       <tr className="border-b border-zinc-200 dark:border-zinc-700">
                         <th className="text-left py-2 px-3 font-medium text-zinc-500">Size</th>
                         <th className="text-right py-2 px-3 font-medium text-zinc-500">Issued</th>
-                        <th className="text-right py-2 px-3 font-medium text-zinc-500">DBC</th>
                         <th className="text-right py-2 px-3 font-medium text-zinc-500">Expected</th>
                         <th className="text-right py-2 px-3 font-medium text-zinc-500">Returned</th>
                         <th className="text-right py-2 px-3 font-medium text-zinc-500">Mismatch</th>
@@ -255,7 +249,6 @@ export default function EmptyCylindersPage() {
                         >
                           <td className="py-2 px-3 font-medium">{item.cylinderSize}</td>
                           <td className="text-right py-2 px-3">{item.issued}</td>
-                          <td className="text-right py-2 px-3">{item.newConnections}</td>
                           <td className="text-right py-2 px-3">{item.expected}</td>
                           <td className="text-right py-2 px-3">{item.returned}</td>
                           <td className="text-right py-2 px-3">
@@ -313,7 +306,6 @@ export default function EmptyCylindersPage() {
                               {s.items.map((item, i) => (
                                 <Badge key={i} variant="secondary" className="text-[10px]">
                                   {item.quantity}x {item.cylinderSize}
-                                  {item.isNewConnection ? " (DBC)" : ""}
                                 </Badge>
                               ))}
                             </div>

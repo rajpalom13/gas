@@ -4,8 +4,9 @@ import { Settlement } from "@/lib/models/Settlement";
 import { Staff } from "@/lib/models/Staff";
 import { Inventory } from "@/lib/models/Inventory";
 import { Customer } from "@/lib/models/Customer";
+import { Category } from "@/lib/models/Category";
 import { requireAuth } from "@/lib/auth";
-import { computeSettlement } from "@/lib/settlement-utils";
+import { computeStaffEntry, computeConsolidated } from "@/lib/settlement-utils";
 
 export async function GET(request: Request) {
   const { error } = await requireAuth();
@@ -18,10 +19,8 @@ export async function GET(request: Request) {
     const page = parseInt(searchParams.get("page") || "1");
     const limit = parseInt(searchParams.get("limit") || "20");
     const dateParam = searchParams.get("date");
-    const groupByDate = searchParams.get("groupByDate") === "true";
 
     const query: Record<string, unknown> = {};
-    if (staffId) query.staff = staffId;
 
     // Date filter using IST timezone
     if (dateParam) {
@@ -30,67 +29,18 @@ export async function GET(request: Request) {
       query.date = { $gte: startOfDay, $lte: endOfDay };
     }
 
-    if (groupByDate) {
-      const matchStage: Record<string, unknown> = {};
-      if (staffId) matchStage.staff = staffId;
-      if (dateParam) matchStage.date = query.date;
-
-      const grouped = await Settlement.aggregate([
-        { $match: matchStage },
-        {
-          $group: {
-            _id: { $dateToString: { format: "%Y-%m-%d", date: "$date", timezone: "+05:30" } },
-            staffIds: { $addToSet: "$staff" },
-            totalCylinders: { $sum: { $sum: "$items.quantity" } },
-            totalNewConnections: {
-              $sum: {
-                $sum: {
-                  $map: {
-                    input: { $filter: { input: "$items", as: "it", cond: { $eq: ["$$it.isNewConnection", true] } } },
-                    as: "nc",
-                    in: "$$nc.quantity",
-                  },
-                },
-              },
-            },
-            netRevenue: { $sum: { $ifNull: ["$netRevenue", "$expectedCash"] } },
-            actualCash: { $sum: { $ifNull: ["$actualCashReceived", "$actualCash"] } },
-            amountPending: { $sum: { $ifNull: ["$amountPending", "$shortage"] } },
-            settlements: { $push: "$$ROOT" },
-          },
-        },
-        { $sort: { _id: -1 } },
-        { $skip: (page - 1) * limit },
-        { $limit: limit },
-      ]);
-
-      const results = grouped.map((g) => {
-        // Compute empty tally across all settlements for that day
-        const emptyTally: Record<string, number> = {};
-        for (const s of g.settlements) {
-          for (const e of s.emptyCylindersReturned || []) {
-            emptyTally[e.cylinderSize] = (emptyTally[e.cylinderSize] || 0) + e.quantity;
-          }
-        }
-
-        return {
-          date: g._id,
-          staffCount: g.staffIds.length,
-          totalCylinders: g.totalCylinders,
-          totalNewConnections: g.totalNewConnections,
-          netRevenue: g.netRevenue,
-          actualCash: g.actualCash,
-          amountPending: g.amountPending,
-          emptyTally: Object.entries(emptyTally).map(([cylinderSize, quantity]) => ({ cylinderSize, quantity })),
-        };
-      });
-
-      return NextResponse.json({ groups: results, page });
+    // For V5, staffId filter needs to check staffEntries.staff
+    if (staffId) {
+      query.$or = [
+        { staff: staffId },
+        { "staffEntries.staff": staffId },
+      ];
     }
 
     const [settlements, total] = await Promise.all([
       Settlement.find(query)
         .populate("staff", "name")
+        .populate("staffEntries.staff", "name")
         .populate("customer", "name phone")
         .sort({ date: -1 })
         .skip((page - 1) * limit)
@@ -106,6 +56,32 @@ export async function GET(request: Request) {
   }
 }
 
+interface StaffEntryInput {
+  staffId: string;
+  items: Array<{
+    cylinderSize: string;
+    quantity: number;
+    priceOverride?: number;
+  }>;
+  addOns: Array<{ category: string; amount: number }>;
+  deductions: Array<{
+    category: string;
+    amount: number;
+    debtorId?: string;
+    debtorName?: string;
+  }>;
+  denominations: Array<{ note: number; count: number; total: number }>;
+  emptyCylindersReturned: Array<{ cylinderSize: string; quantity: number }>;
+  emptyShortage: Array<{
+    cylinderSize: string;
+    shortQty: number;
+    debtorId?: string;
+    debtorName?: string;
+  }>;
+  addToStaffDebt: boolean;
+  notes: string;
+}
+
 export async function POST(request: Request) {
   const { error, session } = await requireAuth();
   if (error) return error;
@@ -113,157 +89,200 @@ export async function POST(request: Request) {
   try {
     await connectDB();
     const body = await request.json();
+    const { date, staffEntries: rawEntries } = body as {
+      date: string;
+      staffEntries: StaffEntryInput[];
+    };
 
-    const {
-      staffId,
-      date,
-      items,
-      transactions = [],
-      actualCashReceived,
-      notes,
-      customerId,
-      emptyCylindersReturned = [],
-      debtors = [],
-      denominations = [],
-      denominationTotal = 0,
-      // Legacy fields for backward compat during transition
-      addPayment,
-      reducePayment,
-      expenses,
-      actualCash,
-    } = body;
+    if (!rawEntries || rawEntries.length === 0) {
+      return NextResponse.json({ error: "At least one delivery man entry is required" }, { status: 400 });
+    }
 
     const result = await withTransaction(async (txSession) => {
-      // Calculate gross revenue and validate stock
-      let grossRevenue = 0;
-      const processedItems = [];
+      const processedEntries = [];
+      let totalGrossRevenue = 0;
+      let totalAddOnsSum = 0;
+      let totalDeductionsSum = 0;
+      let totalExpected = 0;
+      let totalActualReceived = 0;
+      let totalCashDiff = 0;
 
-      for (const item of items) {
-        const inventory = await Inventory.findOne({ cylinderSize: item.cylinderSize }).session(txSession);
-        if (!inventory) {
-          throw new Error(`Inventory not found for ${item.cylinderSize}`);
-        }
+      // Collect unique categories to upsert
+      const categoriesToSave = new Set<string>();
 
-        if (inventory.fullStock < item.quantity) {
-          throw new Error(
-            `Insufficient stock for ${item.cylinderSize}: only ${inventory.fullStock} available, requested ${item.quantity}`
+      for (const entry of rawEntries) {
+        // Process items: validate stock and compute prices
+        let grossRevenue = 0;
+        const processedItems = [];
+
+        for (const item of entry.items) {
+          if (!item.cylinderSize || item.quantity <= 0) continue;
+
+          const inventory = await Inventory.findOne({ cylinderSize: item.cylinderSize }).session(txSession);
+          if (!inventory) {
+            throw new Error(`Inventory not found for ${item.cylinderSize}`);
+          }
+          if (inventory.fullStock < item.quantity) {
+            throw new Error(
+              `Insufficient stock for ${item.cylinderSize}: only ${inventory.fullStock} available, requested ${item.quantity}`
+            );
+          }
+
+          const pricePerUnit = item.priceOverride != null && item.priceOverride > 0
+            ? item.priceOverride
+            : inventory.pricePerUnit;
+          const total = item.quantity * pricePerUnit;
+          grossRevenue += total;
+
+          processedItems.push({
+            cylinderSize: item.cylinderSize,
+            quantity: item.quantity,
+            pricePerUnit,
+            total,
+          });
+
+          // Update inventory: reduce full stock, increase empty stock
+          await Inventory.findOneAndUpdate(
+            { cylinderSize: item.cylinderSize },
+            { $inc: { fullStock: -item.quantity, emptyStock: item.quantity } },
+            { session: txSession }
           );
         }
 
-        // Use priceOverride if provided, else inventory price
-        const pricePerUnit = item.priceOverride != null ? item.priceOverride : inventory.pricePerUnit;
-        const total = item.quantity * pricePerUnit;
-        grossRevenue += total;
+        // Collect categories for auto-save
+        for (const a of entry.addOns) {
+          if (a.category) categoriesToSave.add(`addon:${a.category}`);
+        }
+        for (const d of entry.deductions) {
+          if (d.category) categoriesToSave.add(`deduction:${d.category}`);
+        }
 
-        processedItems.push({
-          cylinderSize: item.cylinderSize,
-          quantity: item.quantity,
-          pricePerUnit,
-          total,
-          isNewConnection: item.isNewConnection || false,
-        });
+        // Compute settlement figures
+        const validAddOns = entry.addOns.filter(a => a.category && a.amount > 0);
+        const validDeductions = entry.deductions.filter(d => d.category && d.amount > 0);
+        const validDenominations = entry.denominations.filter(d => d.count > 0);
 
-        // Update inventory: reduce full stock, increase empty stock
-        await Inventory.findOneAndUpdate(
-          { cylinderSize: item.cylinderSize },
-          { $inc: { fullStock: -item.quantity, emptyStock: item.quantity } },
-          { session: txSession }
+        const computed = computeStaffEntry(
+          processedItems,
+          validAddOns,
+          validDeductions,
+          validDenominations
         );
-      }
 
-      // Determine actual cash: prefer V3 field, fall back to legacy
-      const cashReceived = actualCashReceived != null ? actualCashReceived : (actualCash || 0);
+        // Determine staff debt
+        const staffDebtAdded = entry.addToStaffDebt && computed.cashDifference > 0
+          ? computed.cashDifference
+          : 0;
 
-      // Use computeSettlement for calculations (V3 path)
-      const computed = computeSettlement(processedItems, transactions, cashReceived);
-
-      // If legacy fields were sent and no transactions, compute legacy-style
-      // This handles backward compat during migration
-      let finalComputed = computed;
-      if (transactions.length === 0 && (addPayment || reducePayment || expenses)) {
-        const legacyTransactions = [];
-        if (addPayment) legacyTransactions.push({ category: "Other", type: "credit" as const, amount: addPayment });
-        if (reducePayment) legacyTransactions.push({ category: "Discount", type: "debit" as const, amount: reducePayment });
-        if (expenses) legacyTransactions.push({ category: "Other", type: "debit" as const, amount: expenses });
-        finalComputed = computeSettlement(processedItems, legacyTransactions, cashReceived);
-      }
-
-      const [settlement] = await Settlement.create(
-        [
-          {
-            staff: staffId,
-            date: new Date(date),
-            items: processedItems,
-            grossRevenue: finalComputed.grossRevenue,
-            // V3 fields
-            transactions,
-            totalCredits: finalComputed.totalCredits,
-            totalDebits: finalComputed.totalDebits,
-            netRevenue: finalComputed.netRevenue,
-            actualCashReceived: cashReceived,
-            amountPending: finalComputed.amountPending,
-            emptyCylindersReturned,
-            debtors: debtors.map((d: { customerId: string; type: string; amount?: number; cylinderSize?: string; quantity?: number }) => ({
-              customer: d.customerId,
-              type: d.type,
-              amount: d.amount,
-              cylinderSize: d.cylinderSize,
-              quantity: d.quantity,
-            })),
-            schemaVersion: 3,
-            // Legacy fields (dual-write)
-            addPayment: finalComputed.addPayment,
-            reducePayment: finalComputed.reducePayment,
-            expenses: finalComputed.expenses,
-            expectedCash: finalComputed.expectedCash,
-            actualCash: cashReceived,
-            shortage: finalComputed.shortage,
-            // Common
-            notes: notes || "",
-            denominations,
-            denominationTotal,
-            createdBy: session!.user.id,
-            customer: customerId || undefined,
-          },
-        ],
-        { session: txSession }
-      );
-
-      // Process debtors: update Customer cashDebt/cylinderDebts
-      for (const d of debtors) {
-        if (d.type === "cash" && d.amount > 0) {
-          await Customer.findByIdAndUpdate(
-            d.customerId,
-            { $inc: { cashDebt: d.amount } },
+        // Update staff debt
+        if (staffDebtAdded > 0) {
+          await Staff.findByIdAndUpdate(
+            entry.staffId,
+            { $inc: { debtBalance: staffDebtAdded } },
             { session: txSession }
           );
-        } else if (d.type === "cylinder" && d.cylinderSize && d.quantity > 0) {
-          // Try to increment existing cylinder debt entry
-          const updated = await Customer.findOneAndUpdate(
-            { _id: d.customerId, "cylinderDebts.cylinderSize": d.cylinderSize },
-            { $inc: { "cylinderDebts.$.quantity": d.quantity } },
-            { session: txSession }
-          );
-          // If no matching entry, push a new one
-          if (!updated) {
+        }
+
+        // Process deduction debtors (customer debt)
+        for (const d of validDeductions) {
+          if (d.debtorId && d.amount > 0) {
             await Customer.findByIdAndUpdate(
-              d.customerId,
-              { $push: { cylinderDebts: { cylinderSize: d.cylinderSize, quantity: d.quantity } } },
+              d.debtorId,
+              { $inc: { cashDebt: d.amount } },
               { session: txSession }
             );
           }
         }
+
+        // Process empty shortage debtors (cylinder debt)
+        const validEmptyShortage = (entry.emptyShortage || []).filter(
+          s => s.cylinderSize && s.shortQty > 0 && s.debtorId
+        );
+        for (const s of validEmptyShortage) {
+          const updated = await Customer.findOneAndUpdate(
+            { _id: s.debtorId, "cylinderDebts.cylinderSize": s.cylinderSize } as any,
+            { $inc: { "cylinderDebts.$.quantity": s.shortQty } } as any,
+            { session: txSession }
+          );
+          if (!updated) {
+            await Customer.findByIdAndUpdate(
+              s.debtorId,
+              { $push: { cylinderDebts: { cylinderSize: s.cylinderSize, quantity: s.shortQty } } } as any,
+              { session: txSession }
+            );
+          }
+        }
+
+        const staffEntry = {
+          staff: entry.staffId,
+          items: processedItems,
+          grossRevenue: computed.grossRevenue,
+          addOns: validAddOns,
+          deductions: validDeductions.map(d => ({
+            category: d.category,
+            amount: d.amount,
+            debtorId: d.debtorId || undefined,
+            debtorName: d.debtorName || undefined,
+          })),
+          totalAddOns: computed.totalAddOns,
+          totalDeductions: computed.totalDeductions,
+          amountExpected: computed.amountExpected,
+          denominations: validDenominations,
+          denominationTotal: computed.denominationTotal,
+          cashDifference: computed.cashDifference,
+          staffDebtAdded,
+          emptyCylindersReturned: (entry.emptyCylindersReturned || []).filter(e => e.quantity > 0),
+          emptyShortage: validEmptyShortage.map(s => ({
+            cylinderSize: s.cylinderSize,
+            shortQty: s.shortQty,
+            debtorId: s.debtorId || undefined,
+            debtorName: s.debtorName || undefined,
+          })),
+          notes: entry.notes || "",
+        };
+
+        processedEntries.push(staffEntry);
+        totalGrossRevenue += computed.grossRevenue;
+        totalAddOnsSum += computed.totalAddOns;
+        totalDeductionsSum += computed.totalDeductions;
+        totalExpected += computed.amountExpected;
+        totalActualReceived += computed.denominationTotal;
+        totalCashDiff += computed.cashDifference;
       }
 
-      // Update staff debt if amountPending > 0
-      if (finalComputed.amountPending > 0) {
-        await Staff.findByIdAndUpdate(staffId, { $inc: { debtBalance: finalComputed.amountPending } }, { session: txSession });
-      }
+      // Auto-save categories
+      const categoryOps = Array.from(categoriesToSave).map(key => {
+        const [type, name] = key.split(":", 2);
+        return Category.findOneAndUpdate(
+          { name, type },
+          { name, type },
+          { upsert: true, session: txSession }
+        );
+      });
+      await Promise.all(categoryOps);
+
+      // Create the V5 settlement
+      const [settlement] = await Settlement.create(
+        [{
+          date: new Date(date + "T00:00:00.000+05:30"),
+          staffEntries: processedEntries,
+          totalGrossRevenue,
+          totalAddOns: totalAddOnsSum,
+          totalDeductions: totalDeductionsSum,
+          totalExpected,
+          totalActualReceived,
+          totalCashDifference: totalCashDiff,
+          schemaVersion: 5,
+          createdBy: session!.user.id,
+        }],
+        { session: txSession }
+      );
 
       return settlement;
     });
 
-    const populated = await Settlement.findById(result._id).populate("staff", "name").populate("customer", "name phone");
+    const populated = await Settlement.findById(result._id)
+      .populate("staffEntries.staff", "name");
 
     return NextResponse.json(populated, { status: 201 });
   } catch (error) {

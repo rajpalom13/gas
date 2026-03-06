@@ -4,9 +4,33 @@ import { Settlement } from "@/lib/models/Settlement";
 import { Inventory } from "@/lib/models/Inventory";
 import { Staff } from "@/lib/models/Staff";
 import { requireAuth } from "@/lib/auth";
-import { normalizeSettlement, computeEmptyReconciliation } from "@/lib/settlement-utils";
 
 const LOW_STOCK_THRESHOLD = parseInt(process.env.LOW_STOCK_THRESHOLD || "10");
+
+interface SettlementDoc {
+  schemaVersion?: number;
+  staffEntries?: Array<{
+    items: Array<{ cylinderSize: string; quantity: number }>;
+    grossRevenue: number;
+    totalAddOns: number;
+    totalDeductions: number;
+    denominationTotal: number;
+    cashDifference: number;
+    emptyCylindersReturned: Array<{ cylinderSize: string; quantity: number }>;
+  }>;
+  items?: Array<{ cylinderSize: string; quantity: number; isNewConnection?: boolean }>;
+  grossRevenue?: number;
+  totalCredits?: number;
+  totalDebits?: number;
+  addPayment?: number;
+  reducePayment?: number;
+  expenses?: number;
+  actualCashReceived?: number;
+  actualCash?: number;
+  amountPending?: number;
+  shortage?: number;
+  emptyCylindersReturned?: Array<{ cylinderSize: string; quantity: number }>;
+}
 
 export async function GET(request: Request) {
   const { error } = await requireAuth();
@@ -18,7 +42,6 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const dateParam = searchParams.get("date");
 
-    // Use IST timezone for date calculations
     const istOffset = 5.5 * 60 * 60 * 1000;
     let istDateStr: string;
 
@@ -40,51 +63,65 @@ export async function GET(request: Request) {
       Staff.aggregate([{ $match: { isActive: true } }, { $group: { _id: null, total: { $sum: "$debtBalance" } } }]),
     ]);
 
-    // Normalize all settlements to V3 format for consistent stats
-    const normalized = settlements.map((s) => {
-      const doc = s.toObject() as unknown as Record<string, unknown>;
-      return normalizeSettlement(doc);
-    });
+    let totalDeliveries = 0;
+    let totalRevenue = 0;
+    let totalAddOns = 0;
+    let totalDeductions = 0;
+    let totalActualCash = 0;
+    let totalAmountPending = 0;
 
-    const totalDeliveries = normalized.reduce(
-      (acc, s) => acc + ((s.items as Array<{ quantity: number }>).reduce((a, i) => a + i.quantity, 0)),
-      0
-    );
-    const totalRevenue = normalized.reduce((acc, s) => acc + (s.grossRevenue as number), 0);
-    const totalExpenses = normalized.reduce((acc, s) => acc + (s.totalDebits as number), 0);
-    const totalShortage = normalized.reduce((acc, s) => acc + (s.amountPending as number), 0);
-    const totalActualCash = normalized.reduce((acc, s) => acc + (s.actualCashReceived as number), 0);
-    const totalCredits = normalized.reduce((acc, s) => acc + (s.totalCredits as number), 0);
-    const totalDebits = normalized.reduce((acc, s) => acc + (s.totalDebits as number), 0);
-    const totalAmountPending = normalized.reduce((acc, s) => acc + (s.amountPending as number), 0);
-
-    // Count new connections
-    const totalNewConnections = normalized.reduce((acc, s) => {
-      const items = s.items as Array<{ quantity: number; isNewConnection?: boolean }>;
-      return acc + items.filter((i) => i.isNewConnection).reduce((a, i) => a + i.quantity, 0);
-    }, 0);
-
-    // Empty reconciliation: aggregate per cylinder size across all settlements
-    const allItems: Array<{ cylinderSize: string; quantity: number; isNewConnection?: boolean }> = [];
+    const allItems: Array<{ cylinderSize: string; quantity: number }> = [];
     const allEmpties: Array<{ cylinderSize: string; quantity: number }> = [];
 
-    for (const s of normalized) {
-      const items = s.items as Array<{ cylinderSize: string; quantity: number; isNewConnection?: boolean }>;
-      const empties = s.emptyCylindersReturned as Array<{ cylinderSize: string; quantity: number }>;
-      allItems.push(...items);
-      allEmpties.push(...empties);
+    for (const s of settlements) {
+      const doc = s.toObject() as unknown as SettlementDoc;
+
+      if (doc.schemaVersion === 5 && doc.staffEntries) {
+        for (const entry of doc.staffEntries) {
+          totalDeliveries += entry.items.reduce((a, i) => a + i.quantity, 0);
+          totalRevenue += entry.grossRevenue;
+          totalAddOns += entry.totalAddOns;
+          totalDeductions += entry.totalDeductions;
+          totalActualCash += entry.denominationTotal;
+          totalAmountPending += Math.max(0, entry.cashDifference);
+          allItems.push(...entry.items);
+          allEmpties.push(...entry.emptyCylindersReturned);
+        }
+      } else {
+        // V3/legacy
+        const items = doc.items || [];
+        totalDeliveries += items.reduce((a, i) => a + i.quantity, 0);
+        totalRevenue += doc.grossRevenue || 0;
+        totalAddOns += doc.totalCredits || doc.addPayment || 0;
+        totalDeductions += doc.totalDebits || ((doc.reducePayment || 0) + (doc.expenses || 0));
+        totalActualCash += doc.actualCashReceived || doc.actualCash || 0;
+        totalAmountPending += doc.amountPending || doc.shortage || 0;
+        allItems.push(...items);
+        allEmpties.push(...(doc.emptyCylindersReturned || []));
+      }
     }
 
-    const emptyReconciliation = computeEmptyReconciliation(
-      allItems.map((i) => ({
-        cylinderSize: i.cylinderSize,
-        quantity: i.quantity,
-        pricePerUnit: 0,
-        total: 0,
-        isNewConnection: i.isNewConnection,
-      })),
-      allEmpties
-    );
+    // Build empty reconciliation
+    const issuedMap = new Map<string, number>();
+    for (const item of allItems) {
+      issuedMap.set(item.cylinderSize, (issuedMap.get(item.cylinderSize) || 0) + item.quantity);
+    }
+    const returnedMap = new Map<string, number>();
+    for (const e of allEmpties) {
+      returnedMap.set(e.cylinderSize, (returnedMap.get(e.cylinderSize) || 0) + e.quantity);
+    }
+    const allSizes = new Set([...issuedMap.keys(), ...returnedMap.keys()]);
+    const emptyReconciliation = Array.from(allSizes).map((size) => {
+      const issued = issuedMap.get(size) || 0;
+      const returned = returnedMap.get(size) || 0;
+      return {
+        cylinderSize: size,
+        issued,
+        expected: issued,
+        returned,
+        mismatch: issued - returned,
+      };
+    }).sort((a, b) => a.cylinderSize.localeCompare(b.cylinderSize));
 
     // Low stock alerts
     const lowStockAlerts = inventory
@@ -99,13 +136,10 @@ export async function GET(request: Request) {
       stats: {
         totalDeliveries,
         totalRevenue,
-        totalExpenses,
-        totalShortage,
-        totalActualCash,
-        totalCredits,
-        totalDebits,
-        totalNewConnections,
+        totalAddOns,
+        totalDeductions,
         totalAmountPending,
+        totalActualCash,
         staffCount,
         totalDebt: totalDebt[0]?.total || 0,
       },

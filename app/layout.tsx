@@ -9,8 +9,8 @@ const geistSans = Geist({
 });
 
 export const metadata: Metadata = {
-  title: "Gas Agency - Settlement & Inventory Management",
-  description: "Gas Agency Settlement and Inventory Management System",
+  title: "Gobind Bharat Gas - Settlement & Inventory Management",
+  description: "Gobind Bharat Gas Settlement and Inventory Management System",
 };
 
 export default function RootLayout({

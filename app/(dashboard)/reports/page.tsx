@@ -11,8 +11,9 @@ import {
   AlertTriangle,
   Package,
   FileText,
-  PackagePlus,
   IndianRupee,
+  PlusCircle,
+  Search,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -37,15 +38,11 @@ import { staggerContainer, fadeUpItem } from "@/lib/animations";
 interface ReportSummary {
   totalSettlements: number;
   totalRevenue: number;
-  totalCredits: number;
-  totalDebits: number;
+  totalAddOns: number;
+  totalDeductions: number;
   totalAmountPending: number;
-  totalNewConnections: number;
   totalActualCash: number;
   totalDeliveries: number;
-  // Legacy fallbacks
-  totalExpenses?: number;
-  totalShortage?: number;
 }
 
 interface StaffBreakdownItem {
@@ -53,13 +50,9 @@ interface StaffBreakdownItem {
   staffName: string;
   settlementCount: number;
   totalRevenue: number;
-  totalCredits: number;
-  totalDebits: number;
-  totalAmountPending: number;
+  totalAddOns: number;
+  totalDeductions: number;
   totalDeliveries: number;
-  // Legacy fallbacks
-  totalExpenses?: number;
-  totalShortage?: number;
 }
 
 interface CylinderBreakdownItem {
@@ -75,25 +68,19 @@ interface DailyTrendItem {
   settlements: number;
 }
 
-interface TransactionBreakdownItem {
+interface AddonDeductionItem {
   category: string;
   type: string;
   totalAmount: number;
   count: number;
 }
 
-interface NewConnectionItem {
-  cylinderSize: string;
-  count: number;
-}
-
 interface EmptyReconciliationItem {
   cylinderSize: string;
-  totalIssued: number;
-  totalNewConnections: number;
-  totalExpected: number;
-  totalReturned: number;
-  totalMismatch: number;
+  issued: number;
+  expected: number;
+  returned: number;
+  mismatch: number;
 }
 
 interface ReportData {
@@ -101,9 +88,21 @@ interface ReportData {
   staffBreakdown: StaffBreakdownItem[];
   cylinderBreakdown: CylinderBreakdownItem[];
   dailyTrends: DailyTrendItem[];
-  transactionBreakdown?: TransactionBreakdownItem[];
-  newConnectionReport?: NewConnectionItem[];
-  emptyReconciliation?: EmptyReconciliationItem[];
+  addonDeductionBreakdown?: AddonDeductionItem[];
+  emptyReconciliationSummary?: EmptyReconciliationItem[];
+}
+
+interface CategoryReportItem {
+  date: string;
+  staffName: string;
+  amount: number;
+  type: "addon" | "deduction";
+}
+
+interface CategoryOption {
+  _id: string;
+  name: string;
+  type: string;
 }
 
 function formatDateStr(dateStr: string): string {
@@ -128,6 +127,12 @@ export default function ReportsPage() {
   const [startDate, setStartDate] = useState(toInputDate(thirtyDaysAgo));
   const [endDate, setEndDate] = useState(toInputDate(today));
 
+  // Category report state
+  const [categories, setCategories] = useState<CategoryOption[]>([]);
+  const [selectedCategory, setSelectedCategory] = useState("");
+  const [categoryResults, setCategoryResults] = useState<CategoryReportItem[]>([]);
+  const [categoryLoading, setCategoryLoading] = useState(false);
+
   const fetchReport = useCallback(async (start: string, end: string) => {
     setLoading(true);
     try {
@@ -145,10 +150,31 @@ export default function ReportsPage() {
 
   useEffect(() => {
     fetchReport(startDate, endDate);
+    // Load categories
+    fetch("/api/categories")
+      .then((r) => r.json())
+      .then((json) => setCategories(json.categories || []))
+      .catch(() => {});
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleApply = () => {
     fetchReport(startDate, endDate);
+  };
+
+  const fetchCategoryReport = async () => {
+    if (!selectedCategory) return;
+    setCategoryLoading(true);
+    try {
+      const res = await fetch(
+        `/api/reports/category?category=${encodeURIComponent(selectedCategory)}&startDate=${startDate}&endDate=${endDate}`
+      );
+      const json = await res.json();
+      setCategoryResults(json.results || []);
+    } catch (err) {
+      console.error("Failed to fetch category report:", err);
+    } finally {
+      setCategoryLoading(false);
+    }
   };
 
   const setPreset = (preset: "today" | "7days" | "30days" | "thisMonth") => {
@@ -186,15 +212,14 @@ export default function ReportsPage() {
       "Staff",
       "Cylinder Sizes",
       "Revenue",
-      "Credits",
-      "Debits",
+      "Add Ons",
+      "Deductions",
       "Actual Cash",
       "Amount Pending",
     ];
 
     const rows: string[][] = [];
 
-    // Add staff summary rows
     rows.push(["--- Staff Summary ---", "", "", "", "", "", "", ""]);
     data.staffBreakdown.forEach((staff) => {
       rows.push([
@@ -202,14 +227,13 @@ export default function ReportsPage() {
         staff.staffName,
         `${staff.totalDeliveries} cylinders`,
         staff.totalRevenue.toString(),
-        (staff.totalCredits ?? 0).toString(),
-        (staff.totalDebits ?? staff.totalExpenses ?? 0).toString(),
+        (staff.totalAddOns ?? 0).toString(),
+        (staff.totalDeductions ?? 0).toString(),
         "",
-        (staff.totalAmountPending ?? staff.totalShortage ?? 0).toString(),
+        "",
       ]);
     });
 
-    // Add daily trends
     rows.push(["", "", "", "", "", "", "", ""]);
     rows.push(["--- Daily Trends ---", "", "", "", "", "", "", ""]);
     data.dailyTrends.forEach((day) => {
@@ -225,7 +249,6 @@ export default function ReportsPage() {
       ]);
     });
 
-    // Add cylinder breakdown
     rows.push(["", "", "", "", "", "", "", ""]);
     rows.push(["--- Cylinder Breakdown ---", "", "", "", "", "", "", ""]);
     data.cylinderBreakdown.forEach((cyl) => {
@@ -241,12 +264,11 @@ export default function ReportsPage() {
       ]);
     });
 
-    // Add transaction breakdown
-    if (data.transactionBreakdown && data.transactionBreakdown.length > 0) {
+    if (data.addonDeductionBreakdown && data.addonDeductionBreakdown.length > 0) {
       rows.push(["", "", "", "", "", "", "", ""]);
-      rows.push(["--- Transaction Breakdown ---", "", "", "", "", "", "", ""]);
+      rows.push(["--- Add On / Deduction Breakdown ---", "", "", "", "", "", "", ""]);
       rows.push(["Category", "Type", "", "Total Amount", "Count", "", "", ""]);
-      data.transactionBreakdown.forEach((t) => {
+      data.addonDeductionBreakdown.forEach((t) => {
         rows.push([
           t.category,
           t.type,
@@ -260,35 +282,16 @@ export default function ReportsPage() {
       });
     }
 
-    // Add new connections
-    if (data.newConnectionReport && data.newConnectionReport.length > 0) {
-      rows.push(["", "", "", "", "", "", "", ""]);
-      rows.push(["--- New Connections (DBC) ---", "", "", "", "", "", "", ""]);
-      data.newConnectionReport.forEach((nc) => {
-        rows.push([
-          "",
-          "",
-          `${nc.cylinderSize} x ${nc.count}`,
-          "",
-          "",
-          "",
-          "",
-          "",
-        ]);
-      });
-    }
-
-    // Add summary row
     rows.push(["", "", "", "", "", "", "", ""]);
     rows.push([
       "TOTAL",
       "",
       `${data.summary.totalDeliveries} deliveries`,
       data.summary.totalRevenue.toString(),
-      (data.summary.totalCredits ?? 0).toString(),
-      (data.summary.totalDebits ?? data.summary.totalExpenses ?? 0).toString(),
-      data.summary.totalActualCash.toString(),
-      (data.summary.totalAmountPending ?? data.summary.totalShortage ?? 0).toString(),
+      (data.summary.totalAddOns ?? 0).toString(),
+      (data.summary.totalDeductions ?? 0).toString(),
+      (data.summary.totalActualCash ?? 0).toString(),
+      (data.summary.totalAmountPending ?? 0).toString(),
     ]);
 
     const csvContent = [
@@ -318,33 +321,25 @@ export default function ReportsPage() {
       bg: "bg-emerald-50 dark:bg-emerald-900/20",
     },
     {
-      title: "Total Credits",
-      value: formatCurrency(summary?.totalCredits || 0),
-      icon: IndianRupee,
+      title: "Total Add Ons",
+      value: formatCurrency(summary?.totalAddOns || 0),
+      icon: PlusCircle,
       color: "text-sky-600",
       bg: "bg-sky-50 dark:bg-sky-900/20",
     },
     {
-      title: "Total Debits",
-      value: formatCurrency(summary?.totalDebits ?? summary?.totalExpenses ?? 0),
+      title: "Total Deductions",
+      value: formatCurrency(summary?.totalDeductions || 0),
       icon: TrendingDown,
       color: "text-amber-600",
       bg: "bg-amber-50 dark:bg-amber-900/20",
     },
     {
       title: "Amount Pending",
-      value: formatCurrency(summary?.totalAmountPending ?? summary?.totalShortage ?? 0),
+      value: formatCurrency(summary?.totalAmountPending || 0),
       icon: AlertTriangle,
       color: "text-red-600",
       bg: "bg-red-50 dark:bg-red-900/20",
-    },
-    {
-      title: "New Connections",
-      value: summary?.totalNewConnections || 0,
-      suffix: "DBC",
-      icon: PackagePlus,
-      color: "text-indigo-600",
-      bg: "bg-indigo-50 dark:bg-indigo-900/20",
     },
     {
       title: "Total Deliveries",
@@ -374,7 +369,7 @@ export default function ReportsPage() {
           gradient={sectionThemes.reports.gradient}
         />
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {[...Array(7)].map((_, i) => (
+          {[...Array(6)].map((_, i) => (
             <Skeleton key={i} className="h-32 rounded-xl" />
           ))}
         </div>
@@ -479,7 +474,7 @@ export default function ReportsPage() {
         variants={staggerContainer}
         initial="hidden"
         animate="show"
-        className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"
+        className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3"
       >
         {statCards.map((card) => (
           <motion.div key={card.title} variants={fadeUpItem}>
@@ -509,9 +504,8 @@ export default function ReportsPage() {
                       <TableHead>Name</TableHead>
                       <TableHead className="text-right">Settlements</TableHead>
                       <TableHead className="text-right">Revenue</TableHead>
-                      <TableHead className="text-right">Credits</TableHead>
-                      <TableHead className="text-right">Debits</TableHead>
-                      <TableHead className="text-right">Amount Pending</TableHead>
+                      <TableHead className="text-right">Add Ons</TableHead>
+                      <TableHead className="text-right">Deductions</TableHead>
                       <TableHead className="text-right">Deliveries</TableHead>
                     </TableRow>
                   </TableHeader>
@@ -530,13 +524,10 @@ export default function ReportsPage() {
                           {formatCurrency(staff.totalRevenue)}
                         </TableCell>
                         <TableCell className="text-right text-sky-600">
-                          {formatCurrency(staff.totalCredits ?? 0)}
+                          {formatCurrency(staff.totalAddOns ?? 0)}
                         </TableCell>
                         <TableCell className="text-right text-amber-600">
-                          {formatCurrency(staff.totalDebits ?? staff.totalExpenses ?? 0)}
-                        </TableCell>
-                        <TableCell className="text-right text-red-600">
-                          {formatCurrency(staff.totalAmountPending ?? staff.totalShortage ?? 0)}
+                          {formatCurrency(staff.totalDeductions ?? 0)}
                         </TableCell>
                         <TableCell className="text-right">
                           {staff.totalDeliveries}
@@ -555,12 +546,12 @@ export default function ReportsPage() {
         </Card>
       </motion.div>
 
-      {/* Transaction Category Breakdown */}
-      {data?.transactionBreakdown && data.transactionBreakdown.length > 0 && (
+      {/* Add On / Deduction Breakdown */}
+      {data?.addonDeductionBreakdown && data.addonDeductionBreakdown.length > 0 && (
         <motion.div variants={fadeUpItem} initial="hidden" animate="show">
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">Transaction Category Breakdown</CardTitle>
+              <CardTitle className="text-base">Add On / Deduction Breakdown</CardTitle>
             </CardHeader>
             <CardContent>
               <div className="overflow-x-auto">
@@ -574,12 +565,12 @@ export default function ReportsPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {data.transactionBreakdown.map((t, i) => (
+                    {data.addonDeductionBreakdown.map((t, i) => (
                       <TableRow key={i}>
                         <TableCell className="font-medium">{t.category}</TableCell>
                         <TableCell>
-                          <Badge variant={t.type === "credit" ? "success" : "destructive"}>
-                            {t.type}
+                          <Badge variant={t.type === "addon" ? "success" : "destructive"}>
+                            {t.type === "addon" ? "Add On" : "Deduction"}
                           </Badge>
                         </TableCell>
                         <TableCell className="text-right font-medium">
@@ -598,38 +589,83 @@ export default function ReportsPage() {
         </motion.div>
       )}
 
-      {/* New Connections Report */}
-      {data?.newConnectionReport && data.newConnectionReport.length > 0 && (
-        <motion.div variants={fadeUpItem} initial="hidden" animate="show">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">New Connections (DBC)</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                {data.newConnectionReport.map((nc) => (
-                  <div
-                    key={nc.cylinderSize}
-                    className="rounded-lg border border-indigo-200 dark:border-indigo-800 bg-indigo-50/50 dark:bg-indigo-900/10 p-4"
-                  >
-                    <div className="flex items-center justify-between mb-2">
-                      <p className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">
-                        {nc.cylinderSize}
-                      </p>
-                      <PackagePlus className="h-4 w-4 text-indigo-600" />
-                    </div>
-                    <p className="text-2xl font-bold text-indigo-600">{nc.count}</p>
-                    <p className="text-xs text-zinc-400 mt-0.5">new connections</p>
-                  </div>
-                ))}
+      {/* Category Report */}
+      <motion.div variants={fadeUpItem} initial="hidden" animate="show">
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Category Report</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="flex flex-wrap items-end gap-4 mb-4">
+              <div className="space-y-1.5">
+                <Label className="text-sm">Category</Label>
+                <select
+                  className="flex h-9 w-[200px] rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  value={selectedCategory}
+                  onChange={(e) => setSelectedCategory(e.target.value)}
+                >
+                  <option value="">Select category...</option>
+                  {categories.map((c) => (
+                    <option key={c._id} value={c.name}>
+                      {c.name} ({c.type})
+                    </option>
+                  ))}
+                </select>
               </div>
-            </CardContent>
-          </Card>
-        </motion.div>
-      )}
+              <Button
+                onClick={fetchCategoryReport}
+                disabled={!selectedCategory || categoryLoading}
+                className="gap-2"
+              >
+                <Search className="h-4 w-4" />
+                {categoryLoading ? "Loading..." : "Search"}
+              </Button>
+            </div>
+
+            {categoryResults.length > 0 ? (
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Date</TableHead>
+                      <TableHead>Delivery Man</TableHead>
+                      <TableHead className="text-right">Amount</TableHead>
+                      <TableHead>Type</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {categoryResults.map((item, i) => (
+                      <TableRow key={i}>
+                        <TableCell>{formatDateStr(item.date)}</TableCell>
+                        <TableCell className="font-medium">{item.staffName}</TableCell>
+                        <TableCell className="text-right font-medium">
+                          {formatCurrency(item.amount)}
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant={item.type === "addon" ? "success" : "destructive"}>
+                            {item.type === "addon" ? "Add On" : "Deduction"}
+                          </Badge>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            ) : selectedCategory ? (
+              <p className="text-sm text-zinc-500 text-center py-4">
+                No results. Click Search to query.
+              </p>
+            ) : (
+              <p className="text-sm text-zinc-500 text-center py-4">
+                Select a category and click Search to view details.
+              </p>
+            )}
+          </CardContent>
+        </Card>
+      </motion.div>
 
       {/* Empty Reconciliation Report */}
-      {data?.emptyReconciliation && data.emptyReconciliation.length > 0 && (
+      {data?.emptyReconciliationSummary && data.emptyReconciliationSummary.length > 0 && (
         <motion.div variants={fadeUpItem} initial="hidden" animate="show">
           <Card>
             <CardHeader>
@@ -642,26 +678,24 @@ export default function ReportsPage() {
                     <TableRow>
                       <TableHead>Cylinder Size</TableHead>
                       <TableHead className="text-right">Total Issued</TableHead>
-                      <TableHead className="text-right">Total DBC</TableHead>
                       <TableHead className="text-right">Expected Empties</TableHead>
                       <TableHead className="text-right">Total Returned</TableHead>
                       <TableHead className="text-right">Total Mismatch</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {data.emptyReconciliation.map((item) => (
+                    {data.emptyReconciliationSummary.map((item) => (
                       <TableRow
                         key={item.cylinderSize}
-                        className={item.totalMismatch !== 0 ? "bg-red-50/50 dark:bg-red-900/10" : ""}
+                        className={item.mismatch !== 0 ? "bg-red-50/50 dark:bg-red-900/10" : ""}
                       >
                         <TableCell className="font-medium">{item.cylinderSize}</TableCell>
-                        <TableCell className="text-right">{item.totalIssued}</TableCell>
-                        <TableCell className="text-right">{item.totalNewConnections}</TableCell>
-                        <TableCell className="text-right">{item.totalExpected}</TableCell>
-                        <TableCell className="text-right">{item.totalReturned}</TableCell>
+                        <TableCell className="text-right">{item.issued}</TableCell>
+                        <TableCell className="text-right">{item.expected}</TableCell>
+                        <TableCell className="text-right">{item.returned}</TableCell>
                         <TableCell className="text-right">
-                          <Badge variant={item.totalMismatch !== 0 ? "destructive" : "success"}>
-                            {item.totalMismatch}
+                          <Badge variant={item.mismatch !== 0 ? "destructive" : "success"}>
+                            {item.mismatch}
                           </Badge>
                         </TableCell>
                       </TableRow>

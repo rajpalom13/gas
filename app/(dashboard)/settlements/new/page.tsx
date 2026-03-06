@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
-import { ArrowLeft, Plus, Trash2, Loader2, Calculator, Receipt } from "lucide-react";
+import { ArrowLeft, Plus, Loader2, Calculator, RotateCcw } from "lucide-react";
 import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { sectionThemes } from "@/lib/theme";
@@ -12,25 +12,16 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+  Table,
+  TableHeader,
+  TableBody,
+  TableRow,
+  TableHead,
+  TableCell,
+} from "@/components/ui/table";
 import { formatCurrency } from "@/lib/utils";
 import { toast } from "@/lib/use-toast";
-import { DenominationEntry } from "@/components/denomination-entry";
-import { TransactionEntry } from "@/components/transaction-entry";
-import { EmptyCylinderEntry } from "@/components/empty-cylinder-entry";
-import { DebtorEntry } from "@/components/debtor-entry";
-import { computeSettlement } from "@/lib/settlement-utils";
-
-interface CustomerOption {
-  _id: string;
-  name: string;
-  phone: string;
-}
+import { StaffSettlementSection, type StaffEntryData } from "@/components/staff-settlement-section";
 
 interface StaffOption {
   _id: string;
@@ -43,26 +34,31 @@ interface InventoryOption {
   fullStock: number;
 }
 
-interface SettlementItem {
-  cylinderSize: string;
-  quantity: number;
-  isNewConnection: boolean;
-  priceOverride?: number;
+interface CustomerOption {
+  _id: string;
+  name: string;
+  phone: string;
 }
 
-interface Transaction {
-  category: string;
-  type: "credit" | "debit";
-  amount: number;
-  note?: string;
+function getTodayIST(): string {
+  const now = new Date();
+  const istOffset = 5.5 * 60 * 60 * 1000;
+  const istNow = new Date(now.getTime() + istOffset);
+  return istNow.toISOString().split("T")[0];
 }
 
-interface Debtor {
-  customerId: string;
-  type: "cash" | "cylinder";
-  amount?: number;
-  cylinderSize?: string;
-  quantity?: number;
+function createEmptyEntry(): StaffEntryData {
+  return {
+    staffId: "",
+    items: [{ cylinderSize: "", quantity: 0 }],
+    addOns: [],
+    deductions: [],
+    denominations: [],
+    emptyCylindersReturned: [],
+    emptyShortage: [],
+    addToStaffDebt: false,
+    notes: "",
+  };
 }
 
 export default function NewSettlementPage() {
@@ -70,134 +66,196 @@ export default function NewSettlementPage() {
   const [staffList, setStaffList] = useState<StaffOption[]>([]);
   const [customerList, setCustomerList] = useState<CustomerOption[]>([]);
   const [inventoryList, setInventoryList] = useState<InventoryOption[]>([]);
-  const [staffId, setStaffId] = useState("");
-  const [customerId, setCustomerId] = useState("");
-  const [date, setDate] = useState(new Date().toISOString().split("T")[0]);
-  const [items, setItems] = useState<SettlementItem[]>([
-    { cylinderSize: "", quantity: 0, isNewConnection: false },
-  ]);
-  const [transactions, setTransactions] = useState<Transaction[]>([]);
-  const [actualCashReceived, setActualCashReceived] = useState(0);
-  const [emptyCylindersReturned, setEmptyCylindersReturned] = useState<
-    Array<{ cylinderSize: string; quantity: number }>
-  >([]);
-  const [debtors, setDebtors] = useState<Debtor[]>([]);
-  const [notes, setNotes] = useState("");
-  const [denominations, setDenominations] = useState<
-    { note: number; count: number; total: number }[]
-  >([]);
+  const [addonCategories, setAddonCategories] = useState<string[]>([]);
+  const [deductionCategories, setDeductionCategories] = useState<string[]>([]);
+  const [date, setDate] = useState(getTodayIST());
+  const [staffEntries, setStaffEntries] = useState<StaffEntryData[]>([createEmptyEntry()]);
   const [saving, setSaving] = useState(false);
   const [attempted, setAttempted] = useState(false);
+  const [draftLoaded, setDraftLoaded] = useState(false);
+  const [showDraftPrompt, setShowDraftPrompt] = useState(false);
+  const [draftData, setDraftData] = useState<{ date: string; staffEntries: StaffEntryData[] } | null>(null);
+  const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Load initial data
   useEffect(() => {
     Promise.all([
       fetch("/api/staff").then((r) => r.json()),
       fetch("/api/inventory").then((r) => r.json()),
       fetch("/api/customers").then((r) => r.json()),
-    ]).then(([s, i, c]) => {
+      fetch("/api/categories?type=addon").then((r) => r.json()),
+      fetch("/api/categories?type=deduction").then((r) => r.json()),
+    ]).then(([s, i, c, addonCats, deductCats]) => {
       setStaffList(s);
       setInventoryList(i);
       setCustomerList(c.customers || []);
+      const addonList = addonCats.categories || addonCats || [];
+      const deductList = deductCats.categories || deductCats || [];
+      setAddonCategories(addonList.map((cat: { name: string }) => cat.name));
+      setDeductionCategories(deductList.map((cat: { name: string }) => cat.name));
     });
   }, []);
 
-  const getPrice = (item: SettlementItem) => {
-    if (item.priceOverride && item.priceOverride > 0) return item.priceOverride;
-    return inventoryList.find((i) => i.cylinderSize === item.cylinderSize)?.pricePerUnit || 0;
-  };
+  // Check for draft on load
+  useEffect(() => {
+    const today = getTodayIST();
+    fetch(`/api/settlement-drafts?date=${today}`)
+      .then((r) => r.json())
+      .then((draft) => {
+        if (draft && draft.data) {
+          setDraftData(draft.data as { date: string; staffEntries: StaffEntryData[] });
+          setShowDraftPrompt(true);
+        }
+        setDraftLoaded(true);
+      })
+      .catch(() => setDraftLoaded(true));
+  }, []);
 
-  // Build items with computed totals for the settlement calculator
-  const computedItems = items
-    .filter((i) => i.cylinderSize && i.quantity > 0)
-    .map((item) => {
-      const price = getPrice(item);
-      return {
-        cylinderSize: item.cylinderSize,
-        quantity: item.quantity,
-        pricePerUnit: price,
-        total: item.quantity * price,
-        isNewConnection: item.isNewConnection,
-      };
-    });
-
-  const settlement = computeSettlement(computedItems, transactions, actualCashReceived);
-
-  const addItem = () => {
-    setItems([...items, { cylinderSize: "", quantity: 0, isNewConnection: false }]);
-  };
-
-  const removeItem = (index: number) => {
-    setItems(items.filter((_, i) => i !== index));
-  };
-
-  const updateItem = (
-    index: number,
-    field: keyof SettlementItem,
-    value: string | number | boolean
-  ) => {
-    const newItems = [...items];
-    newItems[index] = { ...newItems[index], [field]: value };
-    setItems(newItems);
-  };
-
-  const hasValidItems = items.some((i) => i.cylinderSize && i.quantity > 0);
-  const canSubmit = !!staffId && hasValidItems;
-
-  const getStockWarning = (item: SettlementItem) => {
-    if (!item.cylinderSize || item.quantity <= 0) return null;
-    const inv = inventoryList.find((i) => i.cylinderSize === item.cylinderSize);
-    if (!inv) return null;
-    if (item.quantity > inv.fullStock) {
-      return `Only ${inv.fullStock} available in stock`;
+  const restoreDraft = () => {
+    if (draftData) {
+      if (draftData.date) setDate(draftData.date);
+      if (draftData.staffEntries) setStaffEntries(draftData.staffEntries);
     }
-    return null;
+    setShowDraftPrompt(false);
   };
 
-  const selectedSizes = items.map((i) => i.cylinderSize).filter(Boolean);
+  const dismissDraft = () => {
+    setShowDraftPrompt(false);
+    // Delete old draft
+    const today = getTodayIST();
+    fetch(`/api/settlement-drafts?date=${today}`, { method: "DELETE" }).catch(() => {});
+  };
+
+  // Auto-save draft
+  const autoSave = useCallback(() => {
+    if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
+    autoSaveTimer.current = setTimeout(() => {
+      const hasData = staffEntries.some(
+        (e) => e.staffId || e.items.some((i) => i.cylinderSize && i.quantity > 0)
+      );
+      if (!hasData) return;
+
+      fetch("/api/settlement-drafts", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          date,
+          data: { date, staffEntries },
+        }),
+      }).catch(() => {});
+    }, 5000);
+  }, [date, staffEntries]);
+
+  useEffect(() => {
+    if (draftLoaded) autoSave();
+    return () => {
+      if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
+    };
+  }, [date, staffEntries, draftLoaded, autoSave]);
+
+  const handleCategoryCreated = (name: string, type: "addon" | "deduction") => {
+    if (type === "addon" && !addonCategories.includes(name)) {
+      setAddonCategories((prev) => [...prev, name]);
+    } else if (type === "deduction" && !deductionCategories.includes(name)) {
+      setDeductionCategories((prev) => [...prev, name]);
+    }
+  };
+
+  const addStaffEntry = () => {
+    setStaffEntries([...staffEntries, createEmptyEntry()]);
+  };
+
+  const removeStaffEntry = (index: number) => {
+    if (staffEntries.length <= 1) return;
+    setStaffEntries(staffEntries.filter((_, i) => i !== index));
+  };
+
+  const updateStaffEntry = (index: number, data: StaffEntryData) => {
+    const updated = [...staffEntries];
+    updated[index] = data;
+    setStaffEntries(updated);
+  };
+
+  const usedStaffIds = staffEntries.map((e) => e.staffId).filter(Boolean);
+
+  // Compute consolidated summary
+  const consolidated = staffEntries.map((entry) => {
+    const grossRevenue = entry.items.reduce((sum, item) => {
+      const inv = inventoryList.find((i) => i.cylinderSize === item.cylinderSize);
+      const price = item.priceOverride ?? inv?.pricePerUnit ?? 0;
+      return sum + price * item.quantity;
+    }, 0);
+    const totalAddOns = entry.addOns.reduce((sum, a) => sum + a.amount, 0);
+    const totalDeductions = entry.deductions.reduce((sum, d) => sum + d.amount, 0);
+    const amountExpected = grossRevenue + totalAddOns - totalDeductions;
+    const amountReceived = entry.denominations.reduce((sum, d) => sum + d.total, 0);
+    const totalCylinders = entry.items.reduce((sum, i) => sum + i.quantity, 0);
+    const totalEmpties = entry.emptyCylindersReturned.reduce((sum, e) => sum + e.quantity, 0);
+    const staffName = staffList.find((s) => s._id === entry.staffId)?.name || "—";
+
+    return {
+      staffName,
+      totalCylinders,
+      totalEmpties,
+      totalAddOns,
+      totalDeductions,
+      amountExpected,
+      amountReceived,
+    };
+  });
+
+  const totals = {
+    cylinders: consolidated.reduce((s, c) => s + c.totalCylinders, 0),
+    empties: consolidated.reduce((s, c) => s + c.totalEmpties, 0),
+    addOns: consolidated.reduce((s, c) => s + c.totalAddOns, 0),
+    deductions: consolidated.reduce((s, c) => s + c.totalDeductions, 0),
+    expected: consolidated.reduce((s, c) => s + c.amountExpected, 0),
+    received: consolidated.reduce((s, c) => s + c.amountReceived, 0),
+  };
+
+  const hasValidEntries = staffEntries.some(
+    (e) => e.staffId && e.items.some((i) => i.cylinderSize && i.quantity > 0)
+  );
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setAttempted(true);
-    if (!canSubmit) return;
+    if (!hasValidEntries) return;
 
     setSaving(true);
     const res = await fetch("/api/settlements", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        staffId,
         date,
-        items: computedItems.map((item) => ({
-          cylinderSize: item.cylinderSize,
-          quantity: item.quantity,
-          isNewConnection: item.isNewConnection,
-          priceOverride: items.find(
-            (i) => i.cylinderSize === item.cylinderSize
-          )?.priceOverride,
-        })),
-        transactions: transactions.filter((t) => t.category && t.amount > 0),
-        actualCash: actualCashReceived,
-        emptyCylindersReturned: emptyCylindersReturned.filter((e) => e.quantity > 0),
-        debtors: debtors
-          .filter((d) => d.customerId)
-          .map((d) => ({
-            customerId: d.customerId,
-            type: d.type,
-            amount: d.amount,
-            cylinderSize: d.cylinderSize,
-            quantity: d.quantity,
+        staffEntries: staffEntries
+          .filter((e) => e.staffId && e.items.some((i) => i.cylinderSize && i.quantity > 0))
+          .map((entry) => ({
+            staffId: entry.staffId,
+            items: entry.items
+              .filter((i) => i.cylinderSize && i.quantity > 0)
+              .map((i) => ({
+                cylinderSize: i.cylinderSize,
+                quantity: i.quantity,
+                priceOverride: i.priceOverride,
+              })),
+            addOns: entry.addOns.filter((a) => a.category && a.amount > 0),
+            deductions: entry.deductions.filter((d) => d.category && d.amount > 0),
+            denominations: entry.denominations.filter((d) => d.count > 0),
+            emptyCylindersReturned: entry.emptyCylindersReturned.filter((e) => e.quantity > 0),
+            emptyShortage: entry.emptyShortage.filter((s) => s.shortQty > 0),
+            addToStaffDebt: entry.addToStaffDebt,
+            notes: entry.notes,
           })),
-        notes,
-        denominations: denominations.filter((d) => d.count > 0),
-        denominationTotal: denominations.reduce((sum, d) => sum + d.total, 0),
-        customerId: customerId && customerId !== "none" ? customerId : undefined,
       }),
     });
 
     if (res.ok) {
+      // Delete draft on success
+      fetch(`/api/settlement-drafts?date=${date}`, { method: "DELETE" }).catch(() => {});
       toast({
         title: "Settlement created",
-        description: "New settlement has been recorded",
+        description: "Daily settlement has been recorded",
         variant: "success",
       });
       router.push("/settlements");
@@ -222,9 +280,34 @@ export default function NewSettlementPage() {
         </Link>
         <div>
           <h1 className="text-2xl font-bold">New Settlement</h1>
-          <p className="text-zinc-500 text-sm mt-1">Record a daily settlement entry</p>
+          <p className="text-zinc-500 text-sm mt-1">Record daily settlement for all delivery men</p>
         </div>
       </div>
+
+      {/* Draft Restore Prompt */}
+      {showDraftPrompt && (
+        <Card className="border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/20">
+          <CardContent className="p-4">
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <RotateCcw className="h-5 w-5 text-blue-600 shrink-0" />
+                <div>
+                  <p className="font-medium text-blue-900 dark:text-blue-100">Resume previous work?</p>
+                  <p className="text-sm text-blue-700 dark:text-blue-300">You have an unfinished settlement from earlier.</p>
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <Button size="sm" variant="outline" onClick={dismissDraft}>
+                  Start Fresh
+                </Button>
+                <Button size="sm" onClick={restoreDraft}>
+                  Restore
+                </Button>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       <form onSubmit={handleSubmit}>
         <motion.div
@@ -232,32 +315,14 @@ export default function NewSettlementPage() {
           animate={{ opacity: 1, y: 0 }}
           className="space-y-6"
         >
-          {/* Staff & Date */}
+          {/* Date */}
           <Card className="relative overflow-hidden">
             <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-blue-500 to-blue-400" />
             <CardHeader>
-              <CardTitle className="text-base">Basic Information</CardTitle>
+              <CardTitle className="text-base">Settlement Date</CardTitle>
             </CardHeader>
-            <CardContent className="grid gap-4 sm:grid-cols-2">
-              <div className="space-y-2">
-                <Label>Staff Member *</Label>
-                <Select value={staffId} onValueChange={setStaffId}>
-                  <SelectTrigger className={attempted && !staffId ? "border-red-400" : ""}>
-                    <SelectValue placeholder="Select staff" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {staffList.map((s) => (
-                      <SelectItem key={s._id} value={s._id}>
-                        {s.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                {attempted && !staffId && (
-                  <p className="text-xs text-red-500">Please select a staff member</p>
-                )}
-              </div>
-              <div className="space-y-2">
+            <CardContent>
+              <div className="space-y-2 max-w-xs">
                 <Label>Date *</Label>
                 <Input
                   type="date"
@@ -266,319 +331,128 @@ export default function NewSettlementPage() {
                   required
                 />
               </div>
-              <div className="space-y-2 sm:col-span-2">
-                <Label>Customer (Optional)</Label>
-                <Select value={customerId} onValueChange={setCustomerId}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select customer" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="none">No customer</SelectItem>
-                    {customerList.map((c) => (
-                      <SelectItem key={c._id} value={c._id}>
-                        {c.name}
-                        {c.phone ? ` — ${c.phone}` : ""}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
             </CardContent>
           </Card>
 
-          {/* Cylinder Items */}
-          <Card className="relative overflow-hidden">
-            <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-indigo-500 to-indigo-400" />
-            <CardHeader>
-              <div className="flex items-center justify-between">
-                <CardTitle className="text-base">Cylinders Delivered</CardTitle>
-                <Button type="button" variant="outline" size="sm" onClick={addItem}>
-                  <Plus className="h-3 w-3" />
-                  Add Cylinder
-                </Button>
-              </div>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              {items.map((item, idx) => {
-                const stockWarning = getStockWarning(item);
-                const availableSizes = inventoryList.filter(
-                  (inv) =>
-                    inv.cylinderSize === item.cylinderSize ||
-                    !selectedSizes.includes(inv.cylinderSize)
-                );
-                const price = getPrice(item);
-                return (
-                  <div key={idx} className="space-y-1">
-                    <div className="flex items-end gap-3 flex-wrap">
-                      <div className="flex-1 min-w-[140px] space-y-1">
-                        <Label className="text-xs">Size</Label>
-                        <Select
-                          value={item.cylinderSize}
-                          onValueChange={(v) => updateItem(idx, "cylinderSize", v)}
-                        >
-                          <SelectTrigger>
-                            <SelectValue placeholder="Select size" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {availableSizes.map((inv) => (
-                              <SelectItem key={inv.cylinderSize} value={inv.cylinderSize}>
-                                {inv.cylinderSize} — {formatCurrency(inv.pricePerUnit)} (Stock:{" "}
-                                {inv.fullStock})
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      <div className="w-20 space-y-1">
-                        <Label className="text-xs">Qty</Label>
-                        <Input
-                          type="number"
-                          min={0}
-                          value={item.quantity || ""}
-                          onChange={(e) =>
-                            updateItem(idx, "quantity", parseInt(e.target.value) || 0)
-                          }
-                        />
-                      </div>
-                      <div className="w-28 space-y-1">
-                        <Label className="text-xs">Price Override</Label>
-                        <Input
-                          type="number"
-                          min={0}
-                          value={item.priceOverride || ""}
-                          onChange={(e) =>
-                            updateItem(
-                              idx,
-                              "priceOverride",
-                              parseFloat(e.target.value) || 0
-                            )
-                          }
-                          placeholder="Default"
-                        />
-                      </div>
-                      {/* DBC toggle */}
-                      <div className="space-y-1">
-                        <Label className="text-xs">DBC</Label>
-                        <Button
-                          type="button"
-                          variant={item.isNewConnection ? "default" : "outline"}
-                          size="sm"
-                          className={`w-16 ${
-                            item.isNewConnection
-                              ? "bg-blue-600 hover:bg-blue-700 text-white"
-                              : ""
-                          }`}
-                          onClick={() =>
-                            updateItem(idx, "isNewConnection", !item.isNewConnection)
-                          }
-                        >
-                          {item.isNewConnection ? "Yes" : "No"}
-                        </Button>
-                      </div>
-                      <div className="w-24 text-right">
-                        <p className="text-sm font-medium">
-                          {formatCurrency(item.quantity * price)}
-                        </p>
-                      </div>
-                      {items.length > 1 && (
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => removeItem(idx)}
-                        >
-                          <Trash2 className="h-4 w-4 text-red-500" />
-                        </Button>
-                      )}
-                    </div>
-                    {stockWarning && (
-                      <p className="text-xs text-amber-600 pl-1">{stockWarning}</p>
-                    )}
-                    {item.isNewConnection && (
-                      <Badge variant="default" className="text-[10px] bg-blue-600">
-                        New Connection (DBC) - No empty return expected
-                      </Badge>
-                    )}
-                  </div>
-                );
-              })}
-              <div className="text-right pt-2 border-t border-zinc-100 dark:border-zinc-800">
-                <p className="text-sm text-zinc-500">Gross Revenue</p>
-                <p className="text-xl font-bold">
-                  {formatCurrency(settlement.grossRevenue)}
-                </p>
-              </div>
-              {attempted && !hasValidItems && (
-                <p className="text-xs text-red-500">
-                  Add at least one cylinder with quantity greater than 0
-                </p>
-              )}
-            </CardContent>
-          </Card>
+          {/* Staff Settlement Sections */}
+          {staffEntries.map((entry, idx) => (
+            <StaffSettlementSection
+              key={idx}
+              index={idx}
+              data={entry}
+              onChange={(data) => updateStaffEntry(idx, data)}
+              onRemove={() => removeStaffEntry(idx)}
+              staffList={staffList}
+              inventoryList={inventoryList}
+              customerList={customerList}
+              addonCategories={addonCategories}
+              deductionCategories={deductionCategories}
+              onCategoryCreated={handleCategoryCreated}
+              usedStaffIds={usedStaffIds}
+            />
+          ))}
 
-          {/* Transactions */}
-          <Card className="relative overflow-hidden">
-            <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-emerald-500 to-emerald-400" />
-            <CardHeader>
-              <CardTitle className="text-base">Transactions</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <TransactionEntry transactions={transactions} onChange={setTransactions} />
-              <div className="pt-4 border-t border-zinc-200 dark:border-zinc-800">
-                <div className="space-y-2">
-                  <Label>Actual Cash Received *</Label>
-                  <Input
-                    type="number"
-                    min={0}
-                    value={actualCashReceived || ""}
-                    onChange={(e) =>
-                      setActualCashReceived(parseFloat(e.target.value) || 0)
-                    }
-                    placeholder="0"
-                  />
-                </div>
-              </div>
-            </CardContent>
-          </Card>
+          {/* Add Another Delivery Man */}
+          <Button
+            type="button"
+            variant="outline"
+            className="w-full border-dashed border-2"
+            onClick={addStaffEntry}
+          >
+            <Plus className="h-4 w-4" />
+            Add Another Delivery Man
+          </Button>
 
-          {/* Empty Cylinders Returned */}
-          <Card className="relative overflow-hidden">
-            <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-amber-500 to-amber-400" />
-            <CardHeader>
-              <CardTitle className="text-base">Empty Cylinders Returned</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <EmptyCylinderEntry
-                items={items.filter((i) => i.cylinderSize && i.quantity > 0)}
-                emptyCylindersReturned={emptyCylindersReturned}
-                onChange={setEmptyCylindersReturned}
-              />
-            </CardContent>
-          </Card>
-
-          {/* Debtor Assignment */}
-          {(settlement.amountPending > 0 ||
-            emptyCylindersReturned.some((e) => {
-              const item = computedItems.find((i) => i.cylinderSize === e.cylinderSize);
-              if (!item) return false;
-              const expected =
-                item.quantity - (item.isNewConnection ? item.quantity : 0);
-              return e.quantity !== expected;
-            })) && (
-            <Card>
+          {/* Consolidated Summary */}
+          {consolidated.length > 0 && totals.cylinders > 0 && (
+            <Card className="bg-zinc-50 dark:bg-zinc-900 border-2 relative overflow-hidden">
+              <div className={`absolute inset-x-0 top-0 h-1 bg-gradient-to-r ${sectionThemes.settlements.gradient}`} />
               <CardHeader>
-                <CardTitle className="text-base">Debtor Assignment</CardTitle>
+                <CardTitle className="text-base flex items-center gap-2">
+                  <Calculator className="h-4 w-4" />
+                  Consolidated Summary
+                </CardTitle>
               </CardHeader>
-              <CardContent>
-                {settlement.amountPending > 0 && (
-                  <div className="rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 p-3 mb-4">
-                    <p className="text-sm text-amber-700 dark:text-amber-400">
-                      Amount pending: {formatCurrency(settlement.amountPending)}. Assign
-                      debtors below.
-                    </p>
+              <CardContent className="space-y-4">
+                <div className="overflow-x-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Name</TableHead>
+                        <TableHead className="text-right">Cylinders</TableHead>
+                        <TableHead className="text-right">Empties</TableHead>
+                        <TableHead className="text-right">Add Ons</TableHead>
+                        <TableHead className="text-right">Deductions</TableHead>
+                        <TableHead className="text-right">Expected</TableHead>
+                        <TableHead className="text-right">Received</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {consolidated.map((c, idx) => (
+                        <TableRow key={idx}>
+                          <TableCell className="font-medium">{c.staffName}</TableCell>
+                          <TableCell className="text-right">{c.totalCylinders}</TableCell>
+                          <TableCell className="text-right">{c.totalEmpties}</TableCell>
+                          <TableCell className="text-right text-emerald-600">
+                            {formatCurrency(c.totalAddOns)}
+                          </TableCell>
+                          <TableCell className="text-right text-red-600">
+                            {formatCurrency(c.totalDeductions)}
+                          </TableCell>
+                          <TableCell className="text-right font-medium">
+                            {formatCurrency(c.amountExpected)}
+                          </TableCell>
+                          <TableCell className="text-right font-medium">
+                            {formatCurrency(c.amountReceived)}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                      <TableRow className="border-t-2 font-bold">
+                        <TableCell>Total</TableCell>
+                        <TableCell className="text-right">{totals.cylinders}</TableCell>
+                        <TableCell className="text-right">{totals.empties}</TableCell>
+                        <TableCell className="text-right text-emerald-600">
+                          {formatCurrency(totals.addOns)}
+                        </TableCell>
+                        <TableCell className="text-right text-red-600">
+                          {formatCurrency(totals.deductions)}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          {formatCurrency(totals.expected)}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          {formatCurrency(totals.received)}
+                        </TableCell>
+                      </TableRow>
+                    </TableBody>
+                  </Table>
+                </div>
+
+                {/* Total difference */}
+                {totals.expected !== totals.received && (
+                  <div className={`p-3 rounded-lg ${
+                    totals.expected > totals.received
+                      ? "bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-800"
+                      : "bg-blue-50 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-800"
+                  }`}>
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium">
+                        Total {totals.expected > totals.received ? "Short" : "Excess"}
+                      </span>
+                      <Badge variant={totals.expected > totals.received ? "destructive" : "default"} className="font-mono">
+                        {formatCurrency(Math.abs(totals.expected - totals.received))}
+                      </Badge>
+                    </div>
                   </div>
                 )}
-                <DebtorEntry
-                  debtors={debtors}
-                  onChange={setDebtors}
-                  customers={customerList}
-                  cylinderSizes={inventoryList.map((i: InventoryOption) => i.cylinderSize)}
-                />
               </CardContent>
             </Card>
           )}
 
-          {/* Denomination Entry */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Cash Denomination (Optional)</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <DenominationEntry
-                denominations={denominations}
-                onChange={setDenominations}
-                actualCash={actualCashReceived}
-              />
-            </CardContent>
-          </Card>
-
-          {/* Notes */}
-          <Card>
-            <CardContent className="pt-6">
-              <div className="space-y-2">
-                <Label>Notes (Optional)</Label>
-                <Input
-                  value={notes}
-                  onChange={(e) => setNotes(e.target.value)}
-                  placeholder="Any additional notes..."
-                />
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Summary */}
-          <Card className="bg-zinc-50 dark:bg-zinc-900 border-2 relative overflow-hidden">
-            <div className={`absolute inset-x-0 top-0 h-1 bg-gradient-to-r ${sectionThemes.settlements.gradient}`} />
-            <CardHeader>
-              <CardTitle className="text-base flex items-center gap-2">
-                <Calculator className="h-4 w-4" />
-                Settlement Summary
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
-                  <p className="text-xs text-zinc-500">Gross Revenue</p>
-                  <p className="text-lg font-bold text-emerald-600">
-                    {formatCurrency(settlement.grossRevenue)}
-                  </p>
-                </div>
-                <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
-                  <p className="text-xs text-zinc-500">+ Credits</p>
-                  <p className="text-lg font-bold text-blue-600">
-                    {formatCurrency(settlement.totalCredits)}
-                  </p>
-                </div>
-                <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
-                  <p className="text-xs text-zinc-500">- Debits</p>
-                  <p className="text-lg font-bold text-orange-600">
-                    {formatCurrency(settlement.totalDebits)}
-                  </p>
-                </div>
-                <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
-                  <p className="text-xs text-zinc-500">Net Revenue</p>
-                  <p className="text-lg font-bold">
-                    {formatCurrency(settlement.netRevenue)}
-                  </p>
-                </div>
-                <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
-                  <p className="text-xs text-zinc-500">Actual Cash</p>
-                  <p className="text-lg font-bold text-blue-600">
-                    {formatCurrency(actualCashReceived)}
-                  </p>
-                </div>
-                <div className="p-3 rounded-lg bg-white dark:bg-zinc-950">
-                  <p className="text-xs text-zinc-500">Amount Pending</p>
-                  <p
-                    className={`text-lg font-bold ${
-                      settlement.amountPending > 0
-                        ? "text-red-600"
-                        : "text-emerald-600"
-                    }`}
-                  >
-                    {formatCurrency(settlement.amountPending)}
-                  </p>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
           <div className="flex items-center justify-end gap-3">
-            {attempted && !canSubmit && (
+            {attempted && !hasValidEntries && (
               <p className="text-sm text-red-500 mr-auto">
-                {!staffId
-                  ? "Select a staff member"
-                  : "Add cylinders with quantity > 0"}
+                Add at least one delivery man with cylinders
               </p>
             )}
             <Link href="/settlements">

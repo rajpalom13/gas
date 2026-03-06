@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import Link from "next/link";
-import { Package, TrendingUp, TrendingDown, AlertTriangle, Users, IndianRupee, ChevronLeft, ChevronRight, Calendar, PackagePlus, LayoutDashboard } from "lucide-react";
+import { Package, TrendingUp, TrendingDown, AlertTriangle, Users, IndianRupee, ChevronLeft, ChevronRight, Calendar, LayoutDashboard, PlusCircle } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -19,16 +19,12 @@ interface DashboardData {
   stats: {
     totalDeliveries: number;
     totalRevenue: number;
-    totalCredits: number;
-    totalDebits: number;
-    totalNewConnections: number;
+    totalAddOns: number;
+    totalDeductions: number;
     totalAmountPending: number;
     totalActualCash: number;
     staffCount: number;
     totalDebt: number;
-    // Legacy fallbacks
-    totalExpenses?: number;
-    totalShortage?: number;
   };
   inventory: Array<{
     cylinderSize: string;
@@ -39,7 +35,6 @@ interface DashboardData {
   emptyReconciliation?: Array<{
     cylinderSize: string;
     issued: number;
-    newConnections: number;
     expected: number;
     returned: number;
     mismatch: number;
@@ -49,7 +44,6 @@ interface DashboardData {
     staff: { name: string };
     date: string;
     grossRevenue: number;
-    shortage: number;
     amountPending?: number;
   }>;
   lowStockAlerts: Array<{
@@ -106,8 +100,8 @@ export default function DashboardPage() {
           subtitle="Daily overview and statistics"
           gradient={sectionThemes.dashboard.gradient}
         />
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
-          {[...Array(5)].map((_, i) => (
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          {[...Array(4)].map((_, i) => (
             <Skeleton key={i} className="h-32 rounded-xl" />
           ))}
         </div>
@@ -134,26 +128,18 @@ export default function DashboardPage() {
       bg: "bg-emerald-50 dark:bg-emerald-900/20",
     },
     {
-      title: "Total Debits",
-      value: formatCurrency(stats?.totalDebits ?? stats?.totalExpenses ?? 0),
+      title: "Total Add Ons",
+      value: formatCurrency(stats?.totalAddOns || 0),
+      icon: PlusCircle,
+      color: "text-sky-600",
+      bg: "bg-sky-50 dark:bg-sky-900/20",
+    },
+    {
+      title: "Total Deductions",
+      value: formatCurrency(stats?.totalDeductions || 0),
       icon: TrendingDown,
       color: "text-amber-600",
       bg: "bg-amber-50 dark:bg-amber-900/20",
-    },
-    {
-      title: "Amount Pending",
-      value: formatCurrency(stats?.totalAmountPending ?? stats?.totalShortage ?? 0),
-      icon: AlertTriangle,
-      color: "text-red-600",
-      bg: "bg-red-50 dark:bg-red-900/20",
-    },
-    {
-      title: "New Connections",
-      value: stats?.totalNewConnections || 0,
-      suffix: "DBC",
-      icon: PackagePlus,
-      color: "text-indigo-600",
-      bg: "bg-indigo-50 dark:bg-indigo-900/20",
     },
   ];
 
@@ -217,7 +203,7 @@ export default function DashboardPage() {
         variants={staggerContainer}
         initial="hidden"
         animate="show"
-        className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5"
+        className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4"
       >
         {statCards.map((card) => (
           <motion.div key={card.title} variants={fadeUpItem}>
@@ -236,8 +222,18 @@ export default function DashboardPage() {
         variants={staggerContainer}
         initial="hidden"
         animate="show"
-        className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3"
+        className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4"
       >
+        <motion.div variants={fadeUpItem}>
+          <StatCard
+            icon={<AlertTriangle className="h-5 w-5" />}
+            label="Amount Pending"
+            value={formatCurrency(stats?.totalAmountPending || 0)}
+            iconBg="bg-red-50 dark:bg-red-900/20"
+            iconColor="text-red-600"
+          />
+        </motion.div>
+
         <motion.div variants={fadeUpItem}>
           <StatCard
             icon={<Users className="h-5 w-5" />}
@@ -344,14 +340,10 @@ export default function DashboardPage() {
                     <p className="text-sm font-semibold text-zinc-700 dark:text-zinc-300 mb-2">
                       {item.cylinderSize}
                     </p>
-                    <div className="grid grid-cols-3 gap-2 text-center text-sm">
+                    <div className="grid grid-cols-2 gap-2 text-center text-sm">
                       <div>
                         <p className="text-xs text-zinc-500">Issued</p>
                         <p className="font-semibold">{item.issued}</p>
-                      </div>
-                      <div>
-                        <p className="text-xs text-zinc-500">DBC</p>
-                        <p className="font-semibold">{item.newConnections}</p>
                       </div>
                       <div>
                         <p className="text-xs text-zinc-500">Expected</p>
@@ -381,7 +373,6 @@ export default function DashboardPage() {
                     <tr className="border-b border-zinc-200 dark:border-zinc-700">
                       <th className="text-left py-2 px-3 font-medium text-zinc-500">Cylinder Size</th>
                       <th className="text-right py-2 px-3 font-medium text-zinc-500">Issued</th>
-                      <th className="text-right py-2 px-3 font-medium text-zinc-500">DBC</th>
                       <th className="text-right py-2 px-3 font-medium text-zinc-500">Expected Empties</th>
                       <th className="text-right py-2 px-3 font-medium text-zinc-500">Returned</th>
                       <th className="text-right py-2 px-3 font-medium text-zinc-500">Mismatch</th>
@@ -397,7 +388,6 @@ export default function DashboardPage() {
                       >
                         <td className="py-2 px-3 font-medium">{item.cylinderSize}</td>
                         <td className="text-right py-2 px-3">{item.issued}</td>
-                        <td className="text-right py-2 px-3">{item.newConnections}</td>
                         <td className="text-right py-2 px-3">{item.expected}</td>
                         <td className="text-right py-2 px-3">{item.returned}</td>
                         <td className="text-right py-2 px-3">

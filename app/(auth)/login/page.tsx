@@ -55,7 +55,7 @@ export default function LoginPage() {
             >
               <Flame className="h-7 w-7 text-white dark:text-zinc-900" />
             </motion.div>
-            <CardTitle className="text-2xl font-bold">Gas Agency</CardTitle>
+            <CardTitle className="text-2xl font-bold">Gobind Bharat Gas</CardTitle>
             <CardDescription>Settlement & Inventory Management</CardDescription>
           </CardHeader>
           <CardContent>
@@ -75,7 +75,7 @@ export default function LoginPage() {
                 <Input
                   id="email"
                   type="email"
-                  placeholder="admin@gasagency.com"
+                  placeholder="admin@gobindbharatgas.com"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   required

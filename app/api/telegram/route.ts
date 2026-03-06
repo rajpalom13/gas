@@ -85,7 +85,7 @@ async function handleMessage(message: {
   if (text === "/start" || text === "/menu") {
     await sendMessage(
       chatId,
-      "🔥 <b>Gas Agency Management</b>\n\nWelcome! Choose an option below:",
+      "🔥 <b>Gobind Bharat Gas</b>\n\nWelcome! Choose an option below:",
       mainMenuKeyboard()
     );
     return;
@@ -109,7 +109,7 @@ async function handleMessage(message: {
   // Unknown command
   await sendMessage(
     chatId,
-    "🔥 <b>Gas Agency Bot</b>\n\nUse /menu to see all options.",
+    "🔥 <b>Gobind Bharat Gas Bot</b>\n\nUse /menu to see all options.",
     mainMenuKeyboard()
   );
 }
@@ -134,7 +134,7 @@ async function handleCallback(query: {
     await editMessage(
       chatId,
       messageId,
-      "🔥 <b>Gas Agency Management</b>\n\nChoose an option:",
+      "🔥 <b>Gobind Bharat Gas</b>\n\nChoose an option:",
       mainMenuKeyboard()
     );
     return;

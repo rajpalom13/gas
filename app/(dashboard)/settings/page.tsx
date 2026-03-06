@@ -157,7 +157,7 @@ export default function SettingsPage() {
           <div className="flex items-center justify-between py-2 border-b border-zinc-100 dark:border-zinc-800">
             <span className="text-sm text-zinc-500">Application</span>
             <span className="text-sm font-medium flex items-center gap-2">
-              <Flame className="h-3 w-3" /> Gas Agency System V1
+              <Flame className="h-3 w-3" /> Gobind Bharat Gas V5
             </span>
           </div>
           <div className="flex items-center justify-between py-2 border-b border-zinc-100 dark:border-zinc-800">

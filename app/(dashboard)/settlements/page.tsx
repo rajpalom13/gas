@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { motion, AnimatePresence } from "framer-motion";
-import { Plus, FileText, Eye, ChevronDown, ChevronRight, List, CalendarDays, Receipt } from "lucide-react";
+import { motion } from "framer-motion";
+import { Plus, FileText, Eye, Receipt } from "lucide-react";
 import Link from "next/link";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -20,39 +20,42 @@ import {
 import { formatCurrency, formatDate } from "@/lib/utils";
 import { Skeleton } from "@/components/ui/skeleton";
 
+interface StaffEntryRow {
+  staff: { _id: string; name: string };
+  grossRevenue: number;
+  totalAddOns: number;
+  totalDeductions: number;
+  amountExpected: number;
+  denominationTotal: number;
+  cashDifference: number;
+  items: Array<{ cylinderSize: string; quantity: number }>;
+  emptyCylindersReturned: Array<{ cylinderSize: string; quantity: number }>;
+}
+
 interface SettlementRow {
   _id: string;
-  staff: { _id: string; name: string };
   date: string;
-  items: Array<{ cylinderSize: string; quantity: number; isNewConnection?: boolean }>;
-  grossRevenue: number;
-  // V3 fields
-  transactions?: Array<{ category: string; type: string; amount: number }>;
-  totalCredits?: number;
-  totalDebits?: number;
+  schemaVersion?: number;
+  // V5 fields
+  staffEntries?: StaffEntryRow[];
+  totalGrossRevenue?: number;
+  totalAddOns?: number;
+  totalDeductions?: number;
+  totalExpected?: number;
+  totalActualReceived?: number;
+  totalCashDifference?: number;
+  // V3 fields (backward compat)
+  staff?: { _id: string; name: string };
+  grossRevenue?: number;
   netRevenue?: number;
   actualCashReceived?: number;
   amountPending?: number;
-  emptyCylindersReturned?: Array<{ cylinderSize: string; quantity: number }>;
-  // Legacy fields
-  expenses: number;
-  expectedCash: number;
-  actualCash: number;
-  shortage: number;
+  items?: Array<{ cylinderSize: string; quantity: number }>;
+  // Legacy
+  expectedCash?: number;
+  actualCash?: number;
+  shortage?: number;
 }
-
-interface DaySummary {
-  date: string;
-  settlements: SettlementRow[];
-  staffCount: number;
-  totalCylinders: number;
-  totalNewConnections: number;
-  totalNetRevenue: number;
-  totalActualCash: number;
-  totalAmountPending: number;
-}
-
-type ViewMode = "list" | "day-summary";
 
 export default function SettlementsPage() {
   const [data, setData] = useState<{
@@ -66,8 +69,6 @@ export default function SettlementsPage() {
   });
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
-  const [viewMode, setViewMode] = useState<ViewMode>("list");
-  const [expandedDays, setExpandedDays] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     setLoading(true);
@@ -77,50 +78,31 @@ export default function SettlementsPage() {
       .finally(() => setLoading(false));
   }, [page]);
 
-  // Helper to get V3 values with legacy fallback
-  const getCredits = (s: SettlementRow) => s.totalCredits ?? 0;
-  const getDebits = (s: SettlementRow) => s.totalDebits ?? s.expenses ?? 0;
-  const getNetRevenue = (s: SettlementRow) => s.netRevenue ?? s.expectedCash ?? 0;
-  const getActualCash = (s: SettlementRow) => s.actualCashReceived ?? s.actualCash ?? 0;
-  const getAmountPending = (s: SettlementRow) => s.amountPending ?? s.shortage ?? 0;
-  const getDBCCount = (s: SettlementRow) =>
-    s.items.filter((i) => i.isNewConnection).reduce((sum, i) => sum + i.quantity, 0);
-  const getTotalEmpties = (s: SettlementRow) =>
-    (s.emptyCylindersReturned || []).reduce((sum, e) => sum + e.quantity, 0);
+  // Helper functions to handle V3/V5/legacy
+  const isV5 = (s: SettlementRow) => s.schemaVersion === 5 && s.staffEntries;
 
-  // Group settlements by date for day summary view
-  const daySummaries: DaySummary[] = (() => {
-    const grouped = new Map<string, SettlementRow[]>();
-    for (const s of data.settlements) {
-      const dateKey = formatDate(s.date);
-      if (!grouped.has(dateKey)) grouped.set(dateKey, []);
-      grouped.get(dateKey)!.push(s);
-    }
-    return Array.from(grouped.entries()).map(([date, settlements]) => {
-      const staffSet = new Set(settlements.map((s) => s.staff._id));
-      return {
-        date,
-        settlements,
-        staffCount: staffSet.size,
-        totalCylinders: settlements.reduce(
-          (sum, s) => sum + s.items.reduce((a, i) => a + i.quantity, 0),
-          0
-        ),
-        totalNewConnections: settlements.reduce((sum, s) => sum + getDBCCount(s), 0),
-        totalNetRevenue: settlements.reduce((sum, s) => sum + getNetRevenue(s), 0),
-        totalActualCash: settlements.reduce((sum, s) => sum + getActualCash(s), 0),
-        totalAmountPending: settlements.reduce((sum, s) => sum + getAmountPending(s), 0),
-      };
-    });
-  })();
+  const getStaffCount = (s: SettlementRow) =>
+    isV5(s) ? s.staffEntries!.length : 1;
 
-  const toggleDay = (date: string) => {
-    setExpandedDays((prev) => {
-      const next = new Set(prev);
-      if (next.has(date)) next.delete(date);
-      else next.add(date);
-      return next;
-    });
+  const getStaffNames = (s: SettlementRow) =>
+    isV5(s)
+      ? s.staffEntries!.map((e) => e.staff?.name || "Unknown").join(", ")
+      : s.staff?.name || "Unknown";
+
+  const getTotalCylinders = (s: SettlementRow) =>
+    isV5(s)
+      ? s.staffEntries!.reduce((sum, e) => sum + e.items.reduce((a, i) => a + i.quantity, 0), 0)
+      : (s.items || []).reduce((sum, i) => sum + i.quantity, 0);
+
+  const getExpected = (s: SettlementRow) =>
+    isV5(s) ? s.totalExpected || 0 : s.netRevenue ?? s.expectedCash ?? 0;
+
+  const getReceived = (s: SettlementRow) =>
+    isV5(s) ? s.totalActualReceived || 0 : s.actualCashReceived ?? s.actualCash ?? 0;
+
+  const getPending = (s: SettlementRow) => {
+    if (isV5(s)) return s.totalCashDifference || 0;
+    return s.amountPending ?? s.shortage ?? 0;
   };
 
   return (
@@ -131,39 +113,12 @@ export default function SettlementsPage() {
         subtitle={`${data.total} total settlements`}
         gradient={sectionThemes.settlements.gradient}
         actions={
-          <div className="flex items-center gap-2">
-            {/* View toggle */}
-            <div className="flex rounded-md border border-zinc-200 dark:border-zinc-800 overflow-hidden">
-              <button
-                className={`px-3 py-2 text-xs font-medium flex items-center gap-1 transition-colors ${
-                  viewMode === "list"
-                    ? "bg-zinc-900 text-white dark:bg-white dark:text-zinc-900"
-                    : "bg-white dark:bg-zinc-950 text-zinc-500 hover:bg-zinc-50 dark:hover:bg-zinc-900"
-                }`}
-                onClick={() => setViewMode("list")}
-              >
-                <List className="h-3 w-3" />
-                List
-              </button>
-              <button
-                className={`px-3 py-2 text-xs font-medium flex items-center gap-1 transition-colors ${
-                  viewMode === "day-summary"
-                    ? "bg-zinc-900 text-white dark:bg-white dark:text-zinc-900"
-                    : "bg-white dark:bg-zinc-950 text-zinc-500 hover:bg-zinc-50 dark:hover:bg-zinc-900"
-                }`}
-                onClick={() => setViewMode("day-summary")}
-              >
-                <CalendarDays className="h-3 w-3" />
-                Day Summary
-              </button>
-            </div>
-            <Link href="/settlements/new">
-              <Button>
-                <Plus className="h-4 w-4" />
-                New Settlement
-              </Button>
-            </Link>
-          </div>
+          <Link href="/settlements/new">
+            <Button>
+              <Plus className="h-4 w-4" />
+              New Settlement
+            </Button>
+          </Link>
         }
       />
 
@@ -173,68 +128,40 @@ export default function SettlementsPage() {
             <Skeleton key={i} className="h-20 rounded-xl" />
           ))}
         </div>
-      ) : viewMode === "list" ? (
+      ) : (
         <>
           {/* Mobile card view */}
           <div className="block sm:hidden space-y-3">
             {data.settlements.map((s) => {
-              const dbcCount = getDBCCount(s);
+              const pending = getPending(s);
               return (
                 <Link key={s._id} href={`/settlements/${s._id}`}>
                   <motion.div
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
                     className={`rounded-xl border border-zinc-200 dark:border-zinc-800 p-4 space-y-3 border-l-4 ${
-                      getAmountPending(s) > 0
+                      pending > 0
                         ? "border-l-amber-500"
                         : "border-l-emerald-500"
                     }`}
                   >
                     <div className="flex items-center justify-between">
                       <div>
-                        <p className="font-medium">{s.staff.name}</p>
+                        <p className="font-medium">{getStaffNames(s)}</p>
                         <p className="text-xs text-zinc-500">{formatDate(s.date)}</p>
                       </div>
-                      <Badge
-                        variant={getAmountPending(s) > 0 ? "destructive" : "success"}
-                      >
-                        {formatCurrency(getAmountPending(s))}
+                      <Badge variant={pending > 0 ? "destructive" : "success"}>
+                        {formatCurrency(pending)}
                       </Badge>
                     </div>
                     <div className="flex items-center justify-between">
-                      <div className="flex gap-1 flex-wrap">
-                        {s.items.map((item, i) => (
-                          <Badge key={i} variant="secondary" className="text-[10px]">
-                            {item.quantity}x {item.cylinderSize}
-                            {item.isNewConnection ? " (DBC)" : ""}
-                          </Badge>
-                        ))}
+                      <div className="flex gap-2 text-xs text-zinc-400">
+                        <span>{getStaffCount(s)} staff</span>
+                        <span>{getTotalCylinders(s)} cylinders</span>
                       </div>
                       <p className="text-sm font-semibold text-emerald-600">
-                        {formatCurrency(getNetRevenue(s))}
+                        {formatCurrency(getExpected(s))}
                       </p>
-                    </div>
-                    <div className="flex items-center gap-3 text-xs text-zinc-400">
-                      {getCredits(s) > 0 && (
-                        <span className="text-emerald-600">
-                          +{formatCurrency(getCredits(s))}
-                        </span>
-                      )}
-                      {getDebits(s) > 0 && (
-                        <span className="text-red-600">
-                          -{formatCurrency(getDebits(s))}
-                        </span>
-                      )}
-                      {dbcCount > 0 && (
-                        <Badge variant="default" className="text-[10px] bg-blue-600">
-                          {dbcCount} DBC
-                        </Badge>
-                      )}
-                      {getTotalEmpties(s) > 0 && (
-                        <Badge variant="warning" className="text-[10px]">
-                          {getTotalEmpties(s)} empties
-                        </Badge>
-                      )}
                     </div>
                   </motion.div>
                 </Link>
@@ -256,26 +183,23 @@ export default function SettlementsPage() {
                   <TableRow>
                     <TableHead>Date</TableHead>
                     <TableHead>Staff</TableHead>
-                    <TableHead>Cylinders</TableHead>
-                    <TableHead>Credits</TableHead>
-                    <TableHead>Debits</TableHead>
-                    <TableHead>Net Revenue</TableHead>
-                    <TableHead>Actual Cash</TableHead>
-                    <TableHead>Pending</TableHead>
-                    <TableHead>Empties</TableHead>
+                    <TableHead className="text-right">Cylinders</TableHead>
+                    <TableHead className="text-right">Expected</TableHead>
+                    <TableHead className="text-right">Received</TableHead>
+                    <TableHead className="text-right">Difference</TableHead>
                     <TableHead className="text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {data.settlements.map((s) => {
-                    const dbcCount = getDBCCount(s);
+                    const pending = getPending(s);
                     return (
                       <motion.tr
                         key={s._id}
                         initial={{ opacity: 0 }}
                         animate={{ opacity: 1 }}
                         className={`border-b border-zinc-100 dark:border-zinc-800 ${
-                          getAmountPending(s) > 0
+                          pending > 0
                             ? "border-l-4 border-l-amber-500"
                             : "border-l-4 border-l-emerald-500"
                         }`}
@@ -289,67 +213,30 @@ export default function SettlementsPage() {
                           </Link>
                         </TableCell>
                         <TableCell>
-                          <Link
-                            href={`/staff/${s.staff._id}/ledger`}
-                            className="hover:underline"
-                          >
-                            {s.staff.name}
-                          </Link>
-                        </TableCell>
-                        <TableCell>
-                          <div className="flex gap-1 flex-wrap">
-                            {s.items.map((item, i) => (
-                              <Badge
-                                key={i}
-                                variant="secondary"
-                                className="text-[10px]"
-                              >
-                                {item.quantity}x {item.cylinderSize}
-                              </Badge>
-                            ))}
-                            {dbcCount > 0 && (
-                              <Badge
-                                variant="default"
-                                className="text-[10px] bg-blue-600"
-                              >
-                                {dbcCount} DBC
-                              </Badge>
+                          <div className="flex flex-col">
+                            <span>{getStaffNames(s)}</span>
+                            {getStaffCount(s) > 1 && (
+                              <span className="text-xs text-zinc-400">
+                                {getStaffCount(s)} delivery men
+                              </span>
                             )}
                           </div>
                         </TableCell>
-                        <TableCell>
-                          <span className="text-emerald-600">
-                            {formatCurrency(getCredits(s))}
-                          </span>
+                        <TableCell className="text-right">
+                          {getTotalCylinders(s)}
                         </TableCell>
-                        <TableCell>
-                          <span className="text-red-600">
-                            {formatCurrency(getDebits(s))}
-                          </span>
+                        <TableCell className="text-right">
+                          {formatCurrency(getExpected(s))}
                         </TableCell>
-                        <TableCell>{formatCurrency(getNetRevenue(s))}</TableCell>
-                        <TableCell>
-                          {formatCurrency(getActualCash(s))}
+                        <TableCell className="text-right">
+                          {formatCurrency(getReceived(s))}
                         </TableCell>
-                        <TableCell>
+                        <TableCell className="text-right">
                           <Badge
-                            variant={
-                              getAmountPending(s) > 0
-                                ? "destructive"
-                                : "success"
-                            }
+                            variant={pending > 0 ? "destructive" : "success"}
                           >
-                            {formatCurrency(getAmountPending(s))}
+                            {formatCurrency(pending)}
                           </Badge>
-                        </TableCell>
-                        <TableCell>
-                          {getTotalEmpties(s) > 0 ? (
-                            <Badge variant="warning" className="text-[10px]">
-                              {getTotalEmpties(s)}
-                            </Badge>
-                          ) : (
-                            <span className="text-zinc-400">0</span>
-                          )}
                         </TableCell>
                         <TableCell className="text-right">
                           <Link href={`/settlements/${s._id}`}>
@@ -365,7 +252,7 @@ export default function SettlementsPage() {
                   {data.settlements.length === 0 && (
                     <TableRow>
                       <TableCell
-                        colSpan={10}
+                        colSpan={7}
                         className="text-center py-12 text-zinc-500"
                       >
                         <FileText className="h-8 w-8 mx-auto mb-2 opacity-50" />
@@ -378,143 +265,6 @@ export default function SettlementsPage() {
             </CardContent>
           </Card>
         </>
-      ) : (
-        /* Day Summary View */
-        <div className="space-y-3">
-          {daySummaries.length === 0 && (
-            <div className="text-center py-12 text-zinc-500">
-              <FileText className="h-8 w-8 mx-auto mb-2 opacity-50" />
-              No settlements yet
-            </div>
-          )}
-          {daySummaries.map((day) => {
-            const isExpanded = expandedDays.has(day.date);
-            return (
-              <motion.div
-                key={day.date}
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden"
-              >
-                {/* Day header */}
-                <button
-                  className="w-full text-left p-4 hover:bg-zinc-50 dark:hover:bg-zinc-900 transition-colors"
-                  onClick={() => toggleDay(day.date)}
-                >
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      {isExpanded ? (
-                        <ChevronDown className="h-4 w-4 text-zinc-400" />
-                      ) : (
-                        <ChevronRight className="h-4 w-4 text-zinc-400" />
-                      )}
-                      <div>
-                        <p className="font-semibold">{day.date}</p>
-                        <p className="text-xs text-zinc-500">
-                          {day.staffCount} staff | {day.totalCylinders} cylinders
-                          {day.totalNewConnections > 0 &&
-                            ` | ${day.totalNewConnections} DBC`}
-                        </p>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-4 text-sm">
-                      <div className="text-right">
-                        <p className="text-xs text-zinc-500">Net Revenue</p>
-                        <p className="font-semibold">
-                          {formatCurrency(day.totalNetRevenue)}
-                        </p>
-                      </div>
-                      <div className="text-right">
-                        <p className="text-xs text-zinc-500">Actual Cash</p>
-                        <p className="font-semibold text-blue-600">
-                          {formatCurrency(day.totalActualCash)}
-                        </p>
-                      </div>
-                      <div className="text-right">
-                        <p className="text-xs text-zinc-500">Pending</p>
-                        <p
-                          className={`font-semibold ${
-                            day.totalAmountPending > 0
-                              ? "text-red-600"
-                              : "text-emerald-600"
-                          }`}
-                        >
-                          {formatCurrency(day.totalAmountPending)}
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                </button>
-
-                {/* Expanded settlements */}
-                <AnimatePresence>
-                  {isExpanded && (
-                    <motion.div
-                      initial={{ height: 0, opacity: 0 }}
-                      animate={{ height: "auto", opacity: 1 }}
-                      exit={{ height: 0, opacity: 0 }}
-                      transition={{ duration: 0.2 }}
-                      className="overflow-hidden"
-                    >
-                      <div className="border-t border-zinc-200 dark:border-zinc-800 p-3 space-y-2 bg-zinc-50/50 dark:bg-zinc-900/50">
-                        {day.settlements.map((s) => {
-                          const dbcCount = getDBCCount(s);
-                          return (
-                            <Link
-                              key={s._id}
-                              href={`/settlements/${s._id}`}
-                              className="block"
-                            >
-                              <div className="flex items-center justify-between p-3 rounded-lg bg-white dark:bg-zinc-950 hover:ring-1 hover:ring-zinc-300 dark:hover:ring-zinc-700 transition-all">
-                                <div className="flex items-center gap-3">
-                                  <span className="font-medium text-sm">
-                                    {s.staff.name}
-                                  </span>
-                                  <div className="flex gap-1 flex-wrap">
-                                    {s.items.map((item, i) => (
-                                      <Badge
-                                        key={i}
-                                        variant="secondary"
-                                        className="text-[10px]"
-                                      >
-                                        {item.quantity}x {item.cylinderSize}
-                                      </Badge>
-                                    ))}
-                                    {dbcCount > 0 && (
-                                      <Badge
-                                        variant="default"
-                                        className="text-[10px] bg-blue-600"
-                                      >
-                                        {dbcCount} DBC
-                                      </Badge>
-                                    )}
-                                  </div>
-                                </div>
-                                <div className="flex items-center gap-3 text-sm">
-                                  <span>{formatCurrency(getNetRevenue(s))}</span>
-                                  <Badge
-                                    variant={
-                                      getAmountPending(s) > 0
-                                        ? "destructive"
-                                        : "success"
-                                    }
-                                    className="text-[10px]"
-                                  >
-                                    {formatCurrency(getAmountPending(s))}
-                                  </Badge>
-                                </div>
-                              </div>
-                            </Link>
-                          );
-                        })}
-                      </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </motion.div>
-            );
-          })}
-        </div>
       )}
 
       {data.pages > 1 && (
